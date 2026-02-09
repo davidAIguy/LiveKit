@@ -6,6 +6,8 @@ import { voiceSessionManager } from "../services/voice/session-manager.js";
 import { twilioMediaBridge } from "../services/voice/twilio-media-bridge.js";
 import { decodeTwilioMediaPayload } from "../services/voice/twilio-audio.js";
 
+const greetedCalls = new Set<string>();
+
 const ConnectedEventSchema = z.object({
   event: z.literal("connected"),
   streamSid: z.string().optional()
@@ -126,6 +128,44 @@ export async function registerTwilioMediaRoutes(app: FastifyInstance): Promise<v
               stream_sid: streamSid,
               call_sid: event.start.callSid
             });
+
+            if (env.VOICE_AUTO_GREETING_ENABLED && !greetedCalls.has(callId)) {
+              greetedCalls.add(callId);
+              try {
+                const speak = await voiceSessionManager.speak(callId, env.VOICE_AUTO_GREETING_TEXT);
+                if (speak.attempted) {
+                  await appendCallEvent(callId, "runtime.voice_tts_synthesized", {
+                    trace_id: traceId,
+                    bytes: speak.bytes,
+                    transport_mode: speak.transport_mode,
+                    source: "auto_greeting"
+                  });
+
+                  if (speak.packet) {
+                    const sent = twilioMediaBridge.sendAgentAudio(callId, speak.packet);
+                    if (sent) {
+                      await appendCallEvent(callId, "runtime.twilio_media_stream_sent_tts", {
+                        trace_id: traceId,
+                        bytes: speak.bytes,
+                        source: "auto_greeting"
+                      });
+                    }
+                  }
+
+                  await appendCallEvent(callId, "runtime.voice_auto_greeting_sent", {
+                    trace_id: traceId,
+                    stream_sid: streamSid
+                  });
+                }
+              } catch (error) {
+                await appendCallEvent(callId, "runtime.voice_tts_failed", {
+                  trace_id: traceId,
+                  source: "auto_greeting",
+                  error: error instanceof Error ? error.message : "voice_auto_greeting_failed"
+                });
+              }
+            }
+
             return;
           }
 
@@ -162,6 +202,7 @@ export async function registerTwilioMediaRoutes(app: FastifyInstance): Promise<v
                 stream_sid: event.streamSid
               });
               twilioMediaBridge.unbindByCallId(callId);
+              greetedCalls.delete(callId);
             }
             socket.close();
           }
@@ -174,6 +215,7 @@ export async function registerTwilioMediaRoutes(app: FastifyInstance): Promise<v
             trace_id: traceId,
             stream_sid: streamSid
           });
+          greetedCalls.delete(callId);
         }
         twilioMediaBridge.unbindBySocket(socket);
       });

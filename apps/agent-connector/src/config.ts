@@ -46,6 +46,13 @@ const EnvSchema = z.object({
     .transform((value) => value === "true"),
   VOICE_BARGE_IN_ENERGY_THRESHOLD: z.coerce.number().positive().max(1).default(0.045),
   VOICE_BARGE_IN_HOLD_MS: z.coerce.number().int().positive().default(1200),
+  VOICE_AUTO_GREETING_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  VOICE_AUTO_GREETING_TEXT: z
+    .string()
+    .default("Hola, soy tu asistente virtual. Estoy aqui para ayudarte. ¿En que te puedo apoyar hoy?"),
   TTS_RIME_API_KEY: z.string().optional(),
   TTS_REMI_API_KEY: z.string().optional(),
   TTS_RIME_API_URL: defaultedUrl("https://users.rime.ai/v1/rime-tts"),
