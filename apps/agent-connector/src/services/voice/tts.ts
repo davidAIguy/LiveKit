@@ -94,6 +94,33 @@ function decodeWavPcm16(buffer: Buffer): VoiceAudioPacket | null {
   };
 }
 
+function parsePositiveNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function isLikelyMp3(buffer: Buffer): boolean {
+  if (buffer.byteLength >= 3 && buffer.toString("ascii", 0, 3) === "ID3") {
+    return true;
+  }
+
+  if (buffer.byteLength >= 2 && buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) {
+    return true;
+  }
+
+  return false;
+}
+
 function parseJsonAudioPayload(payload: unknown): VoiceAudioPacket | null {
   if (!payload || typeof payload !== "object") {
     return null;
@@ -102,6 +129,8 @@ function parseJsonAudioPayload(payload: unknown): VoiceAudioPacket | null {
   const record = payload as Record<string, unknown>;
   const base64 =
     (typeof record.audio_base64 === "string" && record.audio_base64) ||
+    (typeof record.audio_content === "string" && record.audio_content) ||
+    (typeof record.audioContent === "string" && record.audioContent) ||
     (typeof record.audio === "string" && record.audio) ||
     (typeof record.data === "string" && record.data) ||
     "";
@@ -109,25 +138,50 @@ function parseJsonAudioPayload(payload: unknown): VoiceAudioPacket | null {
     return null;
   }
 
+  const bytes = Buffer.from(base64, "base64");
+  if (bytes.byteLength === 0) {
+    return null;
+  }
+
+  const wav = decodeWavPcm16(bytes);
+  if (wav) {
+    return wav;
+  }
+
   const sampleRate =
-    (typeof record.sample_rate_hz === "number" && record.sample_rate_hz) ||
-    (typeof record.sample_rate === "number" && record.sample_rate) ||
+    parsePositiveNumber(record.sample_rate_hz) ||
+    parsePositiveNumber(record.sampleRateHz) ||
+    parsePositiveNumber(record.sample_rate) ||
+    parsePositiveNumber(record.sampleRate) ||
+    parsePositiveNumber(record.rate_hz) ||
+    parsePositiveNumber(record.rate) ||
     env.TTS_DEFAULT_SAMPLE_RATE_HZ;
 
-  const channels =
-    (typeof record.channels === "number" && Number.isInteger(record.channels) && record.channels > 0
-      ? record.channels
-      : 1) || 1;
+  const parsedChannels = parsePositiveNumber(record.channels);
+  const channels = parsedChannels ? Math.max(1, Math.floor(parsedChannels)) : 1;
 
-  const format =
-    record.format === "pcm_s16le"
-      ? "pcm_s16le"
-      : record.format === "opus"
-        ? "opus"
-        : "unknown";
+  const formatInput = typeof record.format === "string" ? record.format.trim().toLowerCase() : "";
+  let format: VoiceAudioPacket["format"] = "unknown";
+  if (formatInput.includes("opus")) {
+    format = "opus";
+  } else if (
+    formatInput === "pcm_s16le" ||
+    formatInput === "pcm16" ||
+    formatInput === "s16le" ||
+    formatInput === "raw" ||
+    formatInput === "raw_pcm"
+  ) {
+    format = "pcm_s16le";
+  } else if (!formatInput && bytes.byteLength % 2 === 0 && !isLikelyMp3(bytes)) {
+    format = "pcm_s16le";
+  }
+
+  if (format === "unknown") {
+    return null;
+  }
 
   return {
-    bytes: new Uint8Array(Buffer.from(base64, "base64")),
+    bytes: new Uint8Array(bytes),
     sampleRateHz: sampleRate,
     channels,
     format
