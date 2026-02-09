@@ -1,0 +1,144 @@
+:root {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: #122026;
+  background: radial-gradient(circle at top left, #edf5ff, #f6f9f4 50%, #f0f7ff);
+}
+
+body {
+  margin: 0;
+}
+
+.layout {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+header {
+  margin-bottom: 16px;
+}
+
+.card {
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid #d8e3e8;
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 8px 30px rgba(41, 72, 87, 0.08);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 4px;
+}
+
+input,
+button {
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid #b4c7cf;
+  padding: 0 10px;
+}
+
+button {
+  background: #1e5f74;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.token-box {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+code {
+  background: #eef3f6;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.split {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 320px 1fr;
+}
+
+@media (max-width: 900px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: grid;
+  gap: 8px;
+}
+
+.list button {
+  width: 100%;
+  text-align: left;
+  display: block;
+  background: #f7fbfd;
+  color: #122026;
+}
+
+.list button.active {
+  border-color: #1e5f74;
+  background: #e8f2f6;
+}
+
+.timeline {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.timeline article {
+  border: 1px solid #d9e5ea;
+  background: #fcfefe;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+pre {
+  margin: 8px 0 0;
+  background: #eff5f9;
+  border-radius: 8px;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

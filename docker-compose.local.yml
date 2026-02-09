@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: livekit-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: livekit_voice_ops
+    ports:
+      - "5432:5432"
+    volumes:
+      - livekit_pgdata:/var/lib/postgresql/data
+
+volumes:
+  livekit_pgdata:
