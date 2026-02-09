@@ -36,21 +36,6 @@ function encodeMuLawSample(sample: number): number {
   return ~(sign | (exponent << 4) | mantissa) & 0xff;
 }
 
-function upsample8kTo16k(samples8k: Int16Array): Int16Array {
-  if (samples8k.length === 0) {
-    return new Int16Array(0);
-  }
-
-  const out = new Int16Array(samples8k.length * 2);
-  for (let i = 0; i < samples8k.length; i += 1) {
-    const current = samples8k[i];
-    const next = i + 1 < samples8k.length ? samples8k[i + 1] : current;
-    out[i * 2] = current;
-    out[i * 2 + 1] = Math.round((current + next) / 2);
-  }
-  return out;
-}
-
 function downsample16kTo8k(samples16k: Int16Array): Int16Array {
   if (samples16k.length === 0) {
     return new Int16Array(0);
@@ -87,10 +72,9 @@ export function decodeTwilioMediaPayload(payloadBase64: string): VoiceInboundAud
     pcm8k[i] = decodeMuLawByte(data[i]);
   }
 
-  const pcm16k = upsample8kTo16k(pcm8k);
   return {
-    samples: pcm16k,
-    sampleRateHz: 16000,
+    samples: pcm8k,
+    sampleRateHz: 8000,
     channels: 1
   };
 }

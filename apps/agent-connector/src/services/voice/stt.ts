@@ -56,7 +56,7 @@ class DeepgramSttAdapter implements SttAdapter {
 
     const query = new URLSearchParams({
       encoding: "linear16",
-      sample_rate: "16000",
+      sample_rate: "8000",
       channels: "1",
       interim_results: "true",
       punctuate: "true",
