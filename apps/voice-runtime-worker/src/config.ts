@@ -9,6 +9,25 @@ const EnvSchema = z.object({
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1500),
   WORKER_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(10),
   WORKER_MAX_ATTEMPTS: z.coerce.number().int().positive().max(20).default(5),
+  INGESTION_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  INGESTION_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
+  INGESTION_BATCH_SIZE: z.coerce.number().int().positive().max(500).default(50),
+  METRICS_LOOKBACK_DAYS: z.coerce.number().int().positive().max(90).default(35),
+  KPI_ROLLUP_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  KPI_ROLLUP_INTERVAL_MS: z.coerce.number().int().positive().default(300000),
+  KPI_LOOKBACK_DAYS: z.coerce.number().int().positive().max(365).default(35),
+  RETENTION_CLEANUP_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  RETENTION_CLEANUP_INTERVAL_MS: z.coerce.number().int().positive().default(86400000),
+  RETENTION_DAYS: z.coerce.number().int().positive().max(3650).default(30),
   LIVEKIT_MOCK_MODE: z
     .enum(["true", "false"])
     .default("false")

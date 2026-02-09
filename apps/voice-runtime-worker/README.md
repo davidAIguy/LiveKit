@@ -2,6 +2,8 @@
 
 Consumes `runtime.handoff_requested` events from `call_events`, creates or confirms LiveKit rooms, and appends dispatch status events.
 
+Also runs ingestion, KPI rollup, and optional retention cleanup loops.
+
 ## Setup
 
 1. Copy `.env.example` to `.env`.
@@ -28,6 +30,10 @@ Consumes `runtime.handoff_requested` events from `call_events`, creates or confi
   - `runtime.agent_session_launch_succeeded`
   - `runtime.agent_session_launch_failed`
 - Persists token in `runtime_dispatches` for secure one-time claim from control-plane API.
+- Projects end-of-call lifecycle from runtime events into `calls` (`ended_at`, `outcome`, `handoff_reason`).
+- Upserts `call_metrics` from call duration and tool execution latency.
+- Refreshes `daily_kpis` on a rolling lookback window.
+- Optionally executes retention cleanup and records each run in `deletion_jobs`.
 
 ## Notes
 
@@ -38,3 +44,11 @@ Consumes `runtime.handoff_requested` events from `call_events`, creates or confi
 - Launcher loop requires `AGENT_LAUNCHER_URL`.
 - Recommended launcher target: `http://localhost:4100/runtime/agent-sessions/launch` (agent-runner service).
 - Set `LIVEKIT_MOCK_MODE=true` for local pipeline tests without a real LiveKit server.
+- Set `RETENTION_CLEANUP_ENABLED=true` only in environments where automated deletion is expected.
+
+## New runtime knobs
+
+- `INGESTION_ENABLED`, `INGESTION_POLL_INTERVAL_MS`, `INGESTION_BATCH_SIZE`
+- `METRICS_LOOKBACK_DAYS`
+- `KPI_ROLLUP_ENABLED`, `KPI_ROLLUP_INTERVAL_MS`, `KPI_LOOKBACK_DAYS`
+- `RETENTION_CLEANUP_ENABLED`, `RETENTION_CLEANUP_INTERVAL_MS`, `RETENTION_DAYS`

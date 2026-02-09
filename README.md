@@ -23,7 +23,7 @@ This repository contains the initial foundation for a multi-tenant AI voice plat
 ## Next implementation steps
 
 1. Replace connector stub with real LiveKit participant bot implementation.
-2. Add ingestion/analytics/retention workers.
+2. Harden analytics dimensions and cost attribution in `call_metrics`.
 3. Build Ops Console and Client Portal web apps.
 
 ## Security baseline
