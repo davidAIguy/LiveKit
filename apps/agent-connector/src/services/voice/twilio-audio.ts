@@ -36,18 +36,28 @@ function encodeMuLawSample(sample: number): number {
   return ~(sign | (exponent << 4) | mantissa) & 0xff;
 }
 
-function downsample16kTo8k(samples16k: Int16Array): Int16Array {
-  if (samples16k.length === 0) {
+function resampleTo8k(samples: Int16Array, sampleRateHz: number): Int16Array {
+  if (samples.length === 0 || sampleRateHz <= 0) {
     return new Int16Array(0);
   }
 
-  const outputLength = Math.floor(samples16k.length / 2);
-  const out = new Int16Array(outputLength);
-  for (let i = 0; i < outputLength; i += 1) {
-    const a = samples16k[i * 2];
-    const b = samples16k[i * 2 + 1] ?? a;
-    out[i] = Math.round((a + b) / 2);
+  if (sampleRateHz === 8000) {
+    return samples;
   }
+
+  const outputLength = Math.max(1, Math.round((samples.length * 8000) / sampleRateHz));
+  const out = new Int16Array(outputLength);
+
+  for (let i = 0; i < outputLength; i += 1) {
+    const sourceIndex = (i * sampleRateHz) / 8000;
+    const indexA = Math.floor(sourceIndex);
+    const indexB = Math.min(samples.length - 1, indexA + 1);
+    const fraction = sourceIndex - indexA;
+    const sampleA = samples[indexA] ?? 0;
+    const sampleB = samples[indexB] ?? sampleA;
+    out[i] = Math.round(sampleA + (sampleB - sampleA) * fraction);
+  }
+
   return out;
 }
 
@@ -55,11 +65,27 @@ function packetToPcm16(packet: VoiceAudioPacket): Int16Array {
   if (packet.format === "pcm_s16le") {
     const buffer = Buffer.from(packet.bytes);
     const byteLength = buffer.byteLength - (buffer.byteLength % 2);
-    const out = new Int16Array(byteLength / 2);
+    const samples = new Int16Array(byteLength / 2);
     for (let offset = 0; offset < byteLength; offset += 2) {
-      out[offset / 2] = buffer.readInt16LE(offset);
+      samples[offset / 2] = buffer.readInt16LE(offset);
     }
-    return out;
+
+    const channels = Math.max(1, packet.channels);
+    if (channels === 1) {
+      return samples;
+    }
+
+    const frames = Math.floor(samples.length / channels);
+    const mono = new Int16Array(frames);
+    for (let i = 0; i < frames; i += 1) {
+      let sum = 0;
+      for (let channel = 0; channel < channels; channel += 1) {
+        sum += samples[i * channels + channel];
+      }
+      mono[i] = Math.round(sum / channels);
+    }
+
+    return mono;
   }
 
   return new Int16Array(0);
@@ -85,7 +111,7 @@ export function encodeTwilioMediaPayload(packet: VoiceAudioPacket): string {
     return "";
   }
 
-  const pcm8k = packet.sampleRateHz === 8000 ? pcm : downsample16kTo8k(pcm);
+  const pcm8k = resampleTo8k(pcm, packet.sampleRateHz);
   const out = Buffer.alloc(pcm8k.length);
   for (let i = 0; i < pcm8k.length; i += 1) {
     out[i] = encodeMuLawSample(pcm8k[i]);
