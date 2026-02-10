@@ -34,6 +34,39 @@ type CallEvent = {
   last_error: string | null;
 };
 
+type TenantRecord = {
+  id: string;
+  name: string;
+  status: string;
+  timezone: string;
+  plan: string;
+  created_at: string;
+};
+
+type AgentRecord = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  status: string;
+  language: string;
+  llm_model: string;
+  stt_provider: string;
+  tts_provider: string;
+  voice_id: string | null;
+  created_at: string;
+};
+
+type AgentVersionRecord = {
+  id: string;
+  agent_id: string;
+  version: number;
+  system_prompt: string;
+  temperature: NumericLike;
+  published_at: string | null;
+  created_at: string;
+  tool_ids: string[];
+};
+
 const defaultTenant = "11111111-1111-1111-1111-111111111111";
 const storageKey = "ops-debug-web.config.v1";
 
@@ -42,6 +75,7 @@ type PersistedConfig = {
   bootstrapKey: string;
   tenantId: string;
   token: string;
+  loginEmail: string;
   fromDate: string;
   toDate: string;
   agentFilter: string;
@@ -115,6 +149,10 @@ function buildIsoFromDate(date: string, endOfDay: boolean): string | null {
   return parsed.toISOString();
 }
 
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function parseJwtClaims(token: string): { tenant_id?: string; role?: string } | null {
   const parts = token.split(".");
   if (parts.length < 2) {
@@ -148,6 +186,10 @@ export function App() {
   const [tenantId, setTenantId] = useState(defaultTenant);
   const [token, setToken] = useState("");
   const [manualTokenInput, setManualTokenInput] = useState("");
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [firstAdminName, setFirstAdminName] = useState("");
+  const [firstAdminTenantName, setFirstAdminTenantName] = useState("My Company");
   const [fromDate, setFromDate] = useState(toLocalDate(7));
   const [toDate, setToDate] = useState(toLocalDate(0));
   const [agentFilter, setAgentFilter] = useState("");
@@ -164,6 +206,20 @@ export function App() {
   const [userTurn, setUserTurn] = useState("Hola, dame un resumen breve de esta llamada");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Ready");
+  const [tenants, setTenants] = useState<TenantRecord[]>([]);
+  const [agents, setAgents] = useState<AgentRecord[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState("");
+  const [agentVersions, setAgentVersions] = useState<AgentVersionRecord[]>([]);
+  const [newTenantName, setNewTenantName] = useState("");
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentLanguage, setNewAgentLanguage] = useState("es");
+  const [newAgentLlmModel, setNewAgentLlmModel] = useState("gpt-4o-mini");
+  const [newAgentSttProvider, setNewAgentSttProvider] = useState("deepgram");
+  const [newAgentTtsProvider, setNewAgentTtsProvider] = useState("rime");
+  const [newVersionPrompt, setNewVersionPrompt] = useState(
+    "Eres un agente de voz profesional. Responde de forma clara y breve en espanol."
+  );
+  const [newVersionTemperature, setNewVersionTemperature] = useState("0.3");
 
   useEffect(() => {
     const raw = localStorage.getItem(storageKey);
@@ -187,6 +243,9 @@ export function App() {
       if (typeof parsed.token === "string") {
         setToken(parsed.token);
         setManualTokenInput(parsed.token);
+      }
+      if (typeof parsed.loginEmail === "string") {
+        setLoginEmail(parsed.loginEmail);
       }
       if (typeof parsed.fromDate === "string") {
         setFromDate(parsed.fromDate);
@@ -226,6 +285,7 @@ export function App() {
       bootstrapKey,
       tenantId,
       token,
+      loginEmail,
       fromDate,
       toDate,
       agentFilter,
@@ -244,6 +304,7 @@ export function App() {
     connectorToken,
     connectorUrl,
     fromDate,
+    loginEmail,
     tenantId,
     toDate,
     token,
@@ -254,6 +315,26 @@ export function App() {
     () => calls.find((call) => call.id === selectedCallId) ?? null,
     [calls, selectedCallId]
   );
+
+  const selectedAgent = useMemo(
+    () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
+    [agents, selectedAgentId]
+  );
+
+  const tenantOptions = useMemo(() => {
+    const items = [...tenants];
+    if (tenantId && !items.some((tenant) => tenant.id === tenantId)) {
+      items.unshift({
+        id: tenantId,
+        name: `Current tenant (${tenantId.slice(0, 8)}...)`,
+        status: "unknown",
+        timezone: "UTC",
+        plan: "unknown",
+        created_at: new Date(0).toISOString()
+      });
+    }
+    return items;
+  }, [tenantId, tenants]);
 
   const totals = useMemo(() => {
     let totalCalls = 0;
@@ -319,6 +400,390 @@ export function App() {
     setStatus("JWT cleared");
   }
 
+  async function loginWithPassword(event: FormEvent) {
+    event.preventDefault();
+
+    const email = loginEmail.trim();
+    if (!email || !loginPassword) {
+      setStatus("Enter email and password");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Signing in...");
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          email,
+          password: loginPassword,
+          tenant_id: isUuid(tenantId) ? tenantId : undefined
+        })
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Login failed (${response.status}): ${body}`);
+      }
+
+      const payload = (await response.json()) as {
+        token: string;
+        active_membership?: { tenant_id: string; role: string };
+      };
+
+      setToken(payload.token);
+      setManualTokenInput(payload.token);
+      if (payload.active_membership?.tenant_id) {
+        setTenantId(payload.active_membership.tenant_id);
+      }
+      setLoginPassword("");
+      setStatus("Signed in successfully");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not sign in");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function registerFirstAdmin(event: FormEvent) {
+    event.preventDefault();
+
+    const email = loginEmail.trim();
+    const name = firstAdminName.trim();
+    const password = loginPassword;
+    const tenantName = firstAdminTenantName.trim();
+
+    if (!email || !name || !password || !tenantName) {
+      setStatus("Complete name, email, password, and tenant name");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Registering first admin...");
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/register-first-admin`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          email,
+          name,
+          password,
+          tenant_name: tenantName,
+          timezone: "UTC",
+          plan: "starter"
+        })
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`First admin setup failed (${response.status}): ${body}`);
+      }
+
+      const payload = (await response.json()) as {
+        token: string;
+        membership?: { tenant_id: string };
+      };
+
+      setToken(payload.token);
+      setManualTokenInput(payload.token);
+      if (payload.membership?.tenant_id) {
+        setTenantId(payload.membership.tenant_id);
+      }
+      setStatus("First admin ready. You are signed in.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not register first admin");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadTenants() {
+    if (!token) {
+      setStatus("Issue or paste JWT first");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Loading tenants...");
+    try {
+      const response = await fetch(`${apiBaseUrl}/internal/tenants`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Tenants request failed (${response.status})`);
+      }
+
+      const body = (await response.json()) as { items: TenantRecord[] };
+      setTenants(body.items);
+
+      if (!tenantId && body.items[0]) {
+        setTenantId(body.items[0].id);
+      }
+
+      setStatus(`Loaded ${body.items.length} tenants`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load tenants");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createTenant(event: FormEvent) {
+    event.preventDefault();
+    if (!token) {
+      setStatus("Issue or paste JWT first");
+      return;
+    }
+
+    const name = newTenantName.trim();
+    if (name.length < 2) {
+      setStatus("Tenant name must have at least 2 chars");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Creating tenant...");
+    try {
+      const response = await fetch(`${apiBaseUrl}/internal/tenants`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ name, timezone: "UTC", plan: "starter" })
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Create tenant failed (${response.status}): ${body}`);
+      }
+
+      const tenant = (await response.json()) as TenantRecord;
+      setNewTenantName("");
+      setTenantId(tenant.id);
+      await loadTenants();
+      setStatus(`Tenant created: ${tenant.name}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not create tenant");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadAgents(targetTenantId = tenantId) {
+    if (!token) {
+      setStatus("Issue or paste JWT first");
+      return;
+    }
+
+    if (!targetTenantId) {
+      setStatus("Select a tenant first");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Loading agents...");
+    try {
+      const params = new URLSearchParams({ tenant_id: targetTenantId, limit: "200" });
+      const response = await fetch(`${apiBaseUrl}/internal/agents?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Agents request failed (${response.status})`);
+      }
+
+      const body = (await response.json()) as { items: AgentRecord[] };
+      setAgents(body.items);
+
+      const keepSelected = body.items.some((agent) => agent.id === selectedAgentId);
+      const nextAgentId = keepSelected ? selectedAgentId : body.items[0]?.id ?? "";
+      setSelectedAgentId(nextAgentId);
+      if (!nextAgentId) {
+        setAgentVersions([]);
+      }
+
+      setStatus(`Loaded ${body.items.length} agents`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load agents");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createAgent(event: FormEvent) {
+    event.preventDefault();
+    if (!token) {
+      setStatus("Issue or paste JWT first");
+      return;
+    }
+    if (!tenantId) {
+      setStatus("Select a tenant first");
+      return;
+    }
+
+    const name = newAgentName.trim();
+    if (name.length < 2) {
+      setStatus("Agent name must have at least 2 chars");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Creating agent...");
+    try {
+      const response = await fetch(`${apiBaseUrl}/internal/agents`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          tenant_id: tenantId,
+          name,
+          language: newAgentLanguage,
+          llm_model: newAgentLlmModel,
+          stt_provider: newAgentSttProvider,
+          tts_provider: newAgentTtsProvider
+        })
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Create agent failed (${response.status}): ${body}`);
+      }
+
+      const agent = (await response.json()) as AgentRecord;
+      setNewAgentName("");
+      await loadAgents(tenantId);
+      setSelectedAgentId(agent.id);
+      setStatus(`Agent created: ${agent.name}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not create agent");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadAgentVersions(agentId: string) {
+    if (!token || !agentId) {
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Loading agent versions...");
+    try {
+      const response = await fetch(`${apiBaseUrl}/internal/agents/${agentId}/versions`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Agent versions request failed (${response.status})`);
+      }
+
+      const body = (await response.json()) as { items: AgentVersionRecord[] };
+      setAgentVersions(body.items);
+      setStatus(`Loaded ${body.items.length} versions`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load agent versions");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createAgentVersion(event: FormEvent) {
+    event.preventDefault();
+    if (!token) {
+      setStatus("Issue or paste JWT first");
+      return;
+    }
+    if (!selectedAgentId) {
+      setStatus("Select an agent first");
+      return;
+    }
+
+    const prompt = newVersionPrompt.trim();
+    if (prompt.length < 10) {
+      setStatus("System prompt must have at least 10 chars");
+      return;
+    }
+
+    const temperature = Number(newVersionTemperature);
+    if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+      setStatus("Temperature must be between 0 and 2");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Creating agent version...");
+    try {
+      const response = await fetch(`${apiBaseUrl}/internal/agents/${selectedAgentId}/versions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ system_prompt: prompt, temperature })
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Create version failed (${response.status}): ${body}`);
+      }
+
+      await loadAgentVersions(selectedAgentId);
+      setStatus("Agent version created");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not create agent version");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function publishAgentVersion(versionId: string) {
+    if (!token) {
+      setStatus("Issue or paste JWT first");
+      return;
+    }
+    if (!selectedAgentId) {
+      setStatus("Select an agent first");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Publishing version...");
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/internal/agents/${selectedAgentId}/versions/${versionId}/publish`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        }
+      );
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Publish version failed (${response.status}): ${body}`);
+      }
+
+      await loadAgentVersions(selectedAgentId);
+      setStatus("Version published");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not publish version");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function bootstrapToken(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -370,8 +835,9 @@ export function App() {
     if (toIso) {
       params.set("to", toIso);
     }
-    if (agentFilter.trim()) {
-      params.set("agent_id", agentFilter.trim());
+    const trimmedAgentFilter = agentFilter.trim();
+    if (trimmedAgentFilter && isUuid(trimmedAgentFilter)) {
+      params.set("agent_id", trimmedAgentFilter);
     }
 
     return params;
@@ -540,6 +1006,50 @@ export function App() {
       </header>
 
       <section className="card">
+        <div className="panel-title-row">
+          <h2>Portal Sign-In</h2>
+          <small>Production-friendly auth (no manual JWT required)</small>
+        </div>
+
+        <form className="row" onSubmit={loginWithPassword}>
+          <label>
+            Email
+            <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} placeholder="you@company.com" />
+          </label>
+          <label>
+            Password
+            <input
+              type="password"
+              value={loginPassword}
+              onChange={(e) => setLoginPassword(e.target.value)}
+              placeholder="your password"
+            />
+          </label>
+          <button disabled={busy} type="submit">
+            Sign In
+          </button>
+        </form>
+
+        <form className="row first-admin-row" onSubmit={registerFirstAdmin}>
+          <label>
+            First admin name (one-time setup)
+            <input value={firstAdminName} onChange={(e) => setFirstAdminName(e.target.value)} placeholder="Owner" />
+          </label>
+          <label>
+            First tenant name
+            <input
+              value={firstAdminTenantName}
+              onChange={(e) => setFirstAdminTenantName(e.target.value)}
+              placeholder="My Company"
+            />
+          </label>
+          <button disabled={busy} type="submit">
+            Register First Admin
+          </button>
+        </form>
+      </section>
+
+      <section className="card">
         <form onSubmit={bootstrapToken} className="row">
           <label>
             API Base URL
@@ -589,6 +1099,187 @@ export function App() {
             JWT: <code>{token ? `${token.slice(0, 28)}...` : "not issued"}</code>
           </span>
           <span>Status: {status}</span>
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="row">
+          <label>
+            Tenant workspace
+            <select
+              value={tenantId}
+              onChange={(e) => {
+                setTenantId(e.target.value);
+                setAgentFilter("");
+                setSelectedAgentId("");
+                setAgents([]);
+                setAgentVersions([]);
+              }}
+            >
+              {tenantOptions.map((tenant) => (
+                <option key={tenant.id} value={tenant.id}>
+                  {tenant.name} ({tenant.id.slice(0, 8)}...)
+                </option>
+              ))}
+            </select>
+          </label>
+          <button disabled={busy || !token} onClick={() => void loadTenants()} type="button">
+            Load Tenants
+          </button>
+          <button disabled={busy || !token} onClick={() => void loadAgents()} type="button">
+            Load Agents
+          </button>
+          <button
+            disabled={busy || !token || !selectedAgentId}
+            onClick={() => void loadAgentVersions(selectedAgentId)}
+            type="button"
+          >
+            Load Versions
+          </button>
+        </div>
+
+        <div className="admin-grid">
+          <form className="admin-box" onSubmit={createTenant}>
+            <h2>Create Tenant</h2>
+            <label>
+              Tenant name
+              <input
+                value={newTenantName}
+                onChange={(e) => setNewTenantName(e.target.value)}
+                placeholder="Acme Dental"
+              />
+            </label>
+            <button disabled={busy || !token} type="submit">
+              Create Tenant
+            </button>
+          </form>
+
+          <form className="admin-box" onSubmit={createAgent}>
+            <h2>Create Agent</h2>
+            <div className="row">
+              <label>
+                Name
+                <input
+                  value={newAgentName}
+                  onChange={(e) => setNewAgentName(e.target.value)}
+                  placeholder="Recepcion Clinica"
+                />
+              </label>
+              <label>
+                Language
+                <input value={newAgentLanguage} onChange={(e) => setNewAgentLanguage(e.target.value)} />
+              </label>
+              <label>
+                LLM model
+                <input value={newAgentLlmModel} onChange={(e) => setNewAgentLlmModel(e.target.value)} />
+              </label>
+              <label>
+                STT provider
+                <input value={newAgentSttProvider} onChange={(e) => setNewAgentSttProvider(e.target.value)} />
+              </label>
+              <label>
+                TTS provider
+                <input value={newAgentTtsProvider} onChange={(e) => setNewAgentTtsProvider(e.target.value)} />
+              </label>
+            </div>
+            <button disabled={busy || !token || !tenantId} type="submit">
+              Create Agent
+            </button>
+          </form>
+        </div>
+
+        <div className="split admin-split">
+          <div>
+            <div className="panel-title-row">
+              <h2>Tenant Agents</h2>
+              <small>{agents.length} loaded</small>
+            </div>
+            <ul className="calls-list">
+              {agents.map((agent) => (
+                <li key={agent.id}>
+                  <button
+                    className={selectedAgentId === agent.id ? "active" : ""}
+                    onClick={() => {
+                      setSelectedAgentId(agent.id);
+                      setAgentFilter(agent.id);
+                      void loadAgentVersions(agent.id);
+                    }}
+                    type="button"
+                  >
+                    <div className="call-main">
+                      <strong>{agent.name}</strong>
+                      <span className="badge ended">{agent.status}</span>
+                    </div>
+                    <small>Agent ID: {agent.id}</small>
+                    <small>LLM: {agent.llm_model}</small>
+                    <small>
+                      STT/TTS: {agent.stt_provider} / {agent.tts_provider}
+                    </small>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="admin-box">
+            <div className="panel-title-row">
+              <h2>Agent Versions</h2>
+              <small>{selectedAgent ? selectedAgent.name : "Select an agent"}</small>
+            </div>
+
+            {selectedAgent ? (
+              <>
+                <form className="row" onSubmit={createAgentVersion}>
+                  <label>
+                    System prompt
+                    <input
+                      value={newVersionPrompt}
+                      onChange={(e) => setNewVersionPrompt(e.target.value)}
+                      placeholder="Prompt para el agente"
+                    />
+                  </label>
+                  <label>
+                    Temperature
+                    <input
+                      value={newVersionTemperature}
+                      onChange={(e) => setNewVersionTemperature(e.target.value)}
+                      placeholder="0.3"
+                    />
+                  </label>
+                  <button disabled={busy || !token} type="submit">
+                    Create Version
+                  </button>
+                </form>
+
+                <div className="versions-list">
+                  {agentVersions.map((version) => (
+                    <article key={version.id} className="version-card">
+                      <div className="panel-title-row">
+                        <strong>v{version.version}</strong>
+                        {version.published_at ? (
+                          <span className="badge active">published</span>
+                        ) : (
+                          <button
+                            disabled={busy || !token}
+                            onClick={() => void publishAgentVersion(version.id)}
+                            type="button"
+                          >
+                            Publish
+                          </button>
+                        )}
+                      </div>
+                      <small>Created: {formatDateTime(version.created_at)}</small>
+                      <small>Temperature: {asNumber(version.temperature).toFixed(2)}</small>
+                      <small>Tools mapped: {version.tool_ids.length}</small>
+                      <pre>{version.system_prompt}</pre>
+                    </article>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p>Select an agent to create and publish versions.</p>
+            )}
+          </div>
         </div>
       </section>
 

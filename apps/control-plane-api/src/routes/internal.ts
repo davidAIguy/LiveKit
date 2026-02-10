@@ -80,6 +80,11 @@ const ListInternalCallsQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(500).default(200)
 });
 
+const ListInternalAgentsQuerySchema = z.object({
+  tenant_id: z.string().uuid().optional(),
+  limit: z.coerce.number().int().positive().max(500).default(200)
+});
+
 export async function registerInternalRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     "/internal/tenants",
@@ -140,6 +145,37 @@ export async function registerInternalRoutes(app: FastifyInstance): Promise<void
     }
   );
 
+  app.get(
+    "/internal/agents",
+    { preHandler: [requireRole(["internal_admin", "internal_operator"], true)] },
+    async (request, reply) => {
+      const auth = request.auth!;
+      const query = ListInternalAgentsQuerySchema.parse(request.query);
+
+      let tenantFilter: string | null = null;
+      if (auth.role === "internal_admin") {
+        tenantFilter = query.tenant_id ?? null;
+      } else {
+        if (query.tenant_id && query.tenant_id !== auth.tenantId) {
+          reply.code(403).send({ error: "forbidden", message: "Cross-tenant read blocked" });
+          return;
+        }
+        tenantFilter = auth.tenantId;
+      }
+
+      const result = await db.query(
+        `select id, tenant_id, name, status, language, llm_model, stt_provider, tts_provider, voice_id, created_at
+         from agents
+         where ($1::uuid is null or tenant_id = $1::uuid)
+         order by created_at desc
+         limit $2`,
+        [tenantFilter, query.limit]
+      );
+
+      reply.send({ items: result.rows });
+    }
+  );
+
   app.post(
     "/internal/agents",
     { preHandler: [requireRole(["internal_admin", "internal_operator"], true)] },
@@ -191,6 +227,46 @@ export async function registerInternalRoutes(app: FastifyInstance): Promise<void
       );
 
       reply.code(201).send(result.rows[0]);
+    }
+  );
+
+  app.get(
+    "/internal/agents/:agentId/versions",
+    { preHandler: [requireRole(["internal_admin", "internal_operator"], true)] },
+    async (request, reply) => {
+      const auth = request.auth!;
+      const params = z.object({ agentId: z.string().uuid() }).parse(request.params);
+
+      const agentRes = await db.query(`select id, tenant_id from agents where id = $1`, [params.agentId]);
+      if (agentRes.rows.length === 0) {
+        reply.code(404).send({ error: "not_found", message: "Agent not found" });
+        return;
+      }
+
+      const agent = agentRes.rows[0] as { tenant_id: string };
+      if (auth.role !== "internal_admin" && agent.tenant_id !== auth.tenantId) {
+        reply.code(403).send({ error: "forbidden", message: "Cross-tenant read blocked" });
+        return;
+      }
+
+      const result = await db.query(
+        `select av.id,
+                av.agent_id,
+                av.version,
+                av.system_prompt,
+                av.temperature,
+                av.published_at,
+                av.created_at,
+                coalesce(array_agg(at.tool_id) filter (where at.tool_id is not null), '{}'::uuid[]) as tool_ids
+         from agent_versions av
+         left join agent_tools at on at.agent_version_id = av.id
+         where av.agent_id = $1
+         group by av.id
+         order by av.version desc`,
+        [params.agentId]
+      );
+
+      reply.send({ items: result.rows });
     }
   );
 

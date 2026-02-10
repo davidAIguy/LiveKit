@@ -9,6 +9,7 @@ import { registerInternalRoutes } from "./routes/internal.js";
 import { registerClientRoutes } from "./routes/client.js";
 import { registerTwilioRoutes } from "./routes/twilio.js";
 import { registerDevRoutes } from "./routes/dev.js";
+import { registerAuthRoutes } from "./routes/auth.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -18,7 +19,14 @@ export function buildApp() {
   app.register(formbody);
 
   app.addHook("preHandler", async (request, reply) => {
-    const openPathPrefixes = ["/health", "/twilio/webhook/inbound", "/internal/dev/token"];
+    const openPathPrefixes = [
+      "/health",
+      "/twilio/webhook/inbound",
+      "/internal/dev/token",
+      "/auth/login",
+      "/auth/register-first-admin",
+      "/auth/bootstrap/user"
+    ];
     if (openPathPrefixes.some((prefix) => request.url.startsWith(prefix))) {
       return;
     }
@@ -41,6 +49,7 @@ export function buildApp() {
   });
 
   app.register(registerHealthRoutes);
+  app.register(registerAuthRoutes);
   app.register(registerDevRoutes);
   app.register(registerTwilioRoutes);
   app.register(registerInternalRoutes);

@@ -8,6 +8,7 @@ Initial backend service for the Voice Agent Ops Platform.
 - JWT auth with role and tenant claims.
 - Role guards for internal and client routes.
 - Internal endpoints for tenants, agents, versions, tools, n8n integration test, and legal hold.
+- Production auth endpoints for first-admin setup and email/password login.
 - Automation Gateway endpoints to execute tenant tools against n8n Cloud with timeout/retry and execution tracing.
 - Client read-only endpoints for KPIs, calls, transcript, and recording metadata.
 - Public Twilio inbound webhook scaffold that creates/updates call sessions.
@@ -47,12 +48,29 @@ Manual token generation:
 node -e "const jwt=require('jsonwebtoken'); console.log(jwt.sign({sub:'user-1',tenant_id:'tenant-1',role:'internal_admin',is_internal:true}, process.env.JWT_SECRET, {issuer:process.env.JWT_ISSUER,audience:process.env.JWT_AUDIENCE,expiresIn:'1h'}));"
 ```
 
+## Production-friendly auth endpoints
+
+- `POST /auth/register-first-admin`
+  - One-time bootstrap when there are no users.
+  - Creates tenant + first internal admin and returns JWT.
+
+- `POST /auth/login`
+  - Body: `email`, `password`, optional `tenant_id`.
+  - Returns JWT and memberships.
+
+- `POST /auth/bootstrap/user`
+  - Guarded by `x-auth-bootstrap-key: $AUTH_BOOTSTRAP_KEY`.
+  - Creates additional users and memberships without exposing dev token route.
+
 ## Public endpoints
 
 - `GET /health`
 - `GET /health/db`
 - `POST /twilio/webhook/inbound`
 - `POST /internal/dev/token` (disabled in production)
+- `POST /auth/register-first-admin`
+- `POST /auth/login`
+- `POST /auth/bootstrap/user` (requires bootstrap key)
 
 ## n8n integration test endpoint
 
@@ -99,6 +117,7 @@ node -e "const jwt=require('jsonwebtoken'); console.log(jwt.sign({sub:'user-1',t
 - JWT secret and encryption key are mandatory.
 - Secret storage currently uses app-level AES-GCM; wire KMS for production.
 - Dev token route requires `DEV_BOOTSTRAP_KEY` and is disabled in production.
+- Auth bootstrap route uses `AUTH_BOOTSTRAP_KEY` (recommended in staging/ops only).
 - `AUTOMATION_MAX_EXECUTIONS_PER_MINUTE` controls per-call rate limiting.
 - `AUTOMATION_REQUIRE_AGENT_TOOL_MAPPING=true` enforces agent-version tool allowlist.
 - Schedule `db/jobs/expire_runtime_dispatches.sql` to expire stale pending dispatches.

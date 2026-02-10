@@ -157,6 +157,48 @@ code {
   margin-bottom: 14px;
 }
 
+.admin-grid {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+}
+
+.admin-box {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fffcf7;
+  padding: 10px;
+}
+
+.admin-box h2 {
+  font-size: 1rem;
+  margin-bottom: 8px;
+}
+
+.admin-box form {
+  margin-top: 8px;
+}
+
+.admin-split {
+  margin-top: 10px;
+}
+
+.versions-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+  max-height: 48vh;
+  overflow: auto;
+}
+
+.version-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: #fffefb;
+}
+
 .kpi-card {
   background: linear-gradient(175deg, var(--surface-soft), var(--surface));
   border: 1px solid var(--border);

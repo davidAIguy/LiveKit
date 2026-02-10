@@ -21,6 +21,8 @@ const EnvSchema = z.object({
     .enum(["true", "false"])
     .default("true")
     .transform((value) => value === "true"),
+  AUTH_JWT_EXPIRES_IN: z.string().default("8h"),
+  AUTH_BOOTSTRAP_KEY: z.string().optional(),
   DEV_BOOTSTRAP_KEY: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
   TWILIO_VALIDATE_SIGNATURE: z
