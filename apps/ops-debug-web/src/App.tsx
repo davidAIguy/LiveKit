@@ -1,48 +1,9 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type NumericLike = number | string | null;
-type ViewKey = "workspace" | "agents" | "operations";
+type ViewKey = "clients" | "agents" | "operations";
+type AuthMode = "signin" | "setup";
 type WizardStep = 1 | 2 | 3;
-
-type TenantSnapshot = {
-  calls: number;
-  activeCalls: number;
-  resolvedCalls: number;
-  handoffCalls: number;
-  lastStartedAt: string | null;
-};
-
-type CallRecord = {
-  id: string;
-  agent_id: string;
-  twilio_call_sid: string;
-  outcome: string | null;
-  handoff_reason: string | null;
-  legal_hold: boolean;
-  started_at: string;
-  ended_at: string | null;
-};
-
-type KpiRecord = {
-  day: string;
-  tenant_id: string;
-  agent_id: string | null;
-  calls: number;
-  avg_duration_sec: NumericLike;
-  resolution_rate: NumericLike;
-  handoff_rate: NumericLike;
-  total_cost_usd: NumericLike;
-};
-
-type CallEvent = {
-  id: string;
-  ts: string;
-  type: string;
-  payload_json: unknown;
-  processing_attempts: number;
-  processed_at: string | null;
-  last_error: string | null;
-};
 
 type TenantRecord = {
   id: string;
@@ -77,42 +38,61 @@ type AgentVersionRecord = {
   tool_ids: string[];
 };
 
+type CallRecord = {
+  id: string;
+  agent_id: string;
+  twilio_call_sid: string;
+  outcome: string | null;
+  handoff_reason: string | null;
+  legal_hold: boolean;
+  started_at: string;
+  ended_at: string | null;
+};
+
+type CallEvent = {
+  id: string;
+  ts: string;
+  type: string;
+  payload_json: unknown;
+  processing_attempts: number;
+  processed_at: string | null;
+  last_error: string | null;
+};
+
+type KpiRecord = {
+  day: string;
+  tenant_id: string;
+  agent_id: string | null;
+  calls: number;
+  avg_duration_sec: NumericLike;
+  resolution_rate: NumericLike;
+  handoff_rate: NumericLike;
+  total_cost_usd: NumericLike;
+};
+
+type TenantSnapshot = {
+  calls: number;
+  activeCalls: number;
+  resolvedCalls: number;
+  handoffCalls: number;
+  lastStartedAt: string | null;
+};
+
 type PersistedConfig = {
   apiBaseUrl: string;
-  bootstrapKey: string;
-  tenantId: string;
   token: string;
   loginEmail: string;
+  tenantId: string;
+  activeView: ViewKey;
+  tenantSearch: string;
   fromDate: string;
   toDate: string;
   agentFilter: string;
-  connectorUrl: string;
-  connectorToken: string;
-  userTurn: string;
   autoRefreshSeconds: number;
-  firstAdminTenantName: string;
-  activeView: ViewKey;
 };
 
-const storageKey = "ops-debug-web.config.v3";
+const storageKey = "ops-portal.config.v1";
 const defaultTenant = "11111111-1111-1111-1111-111111111111";
-
-const defaultConfig: PersistedConfig = {
-  apiBaseUrl: "http://localhost:4000",
-  bootstrapKey: "",
-  tenantId: defaultTenant,
-  token: "",
-  loginEmail: "",
-  fromDate: toLocalDate(7),
-  toDate: toLocalDate(0),
-  agentFilter: "",
-  connectorUrl: "http://localhost:4200",
-  connectorToken: "",
-  userTurn: "Hola, dame un resumen breve de esta llamada",
-  autoRefreshSeconds: 0,
-  firstAdminTenantName: "My Company",
-  activeView: "workspace"
-};
 
 const usdFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -134,17 +114,17 @@ function asNumber(value: NumericLike): number {
   return 0;
 }
 
-function formatDateTime(input: string | null): string {
-  if (!input) {
+function formatDateTime(value: string | null): string {
+  if (!value) {
     return "-";
   }
-  return new Date(input).toLocaleString();
+  return new Date(value).toLocaleString();
 }
 
-function formatDay(input: string): string {
-  const parsed = new Date(input);
+function formatDay(value: string): string {
+  const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
-    return input;
+    return value;
   }
   return parsed.toLocaleDateString();
 }
@@ -156,11 +136,9 @@ function formatSeconds(totalSeconds: number): string {
 
   const mins = Math.floor(totalSeconds / 60);
   const seconds = Math.round(totalSeconds % 60);
-
   if (mins === 0) {
     return `${seconds}s`;
   }
-
   return `${mins}m ${seconds}s`;
 }
 
@@ -208,81 +186,81 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
     const body = await response.text();
-    const details = body ? `: ${body}` : "";
-    throw new Error(`${response.status} ${response.statusText}${details}`);
+    throw new Error(`${response.status} ${response.statusText}${body ? `: ${body}` : ""}`);
   }
 
   return (await response.json()) as T;
 }
 
+function summarizeCalls(
+  items: Array<{ started_at: string; ended_at: string | null; outcome: string | null; handoff_reason: string | null }>
+): TenantSnapshot {
+  return {
+    calls: items.length,
+    activeCalls: items.filter((item) => !item.ended_at).length,
+    resolvedCalls: items.filter((item) => item.outcome === "resolved").length,
+    handoffCalls: items.filter((item) => item.outcome === "handoff" || Boolean(item.handoff_reason)).length,
+    lastStartedAt: items[0]?.started_at ?? null
+  };
+}
+
 export function App() {
-  const [activeView, setActiveView] = useState<ViewKey>(defaultConfig.activeView);
-  const [apiBaseUrl, setApiBaseUrl] = useState(defaultConfig.apiBaseUrl);
-  const [bootstrapKey, setBootstrapKey] = useState(defaultConfig.bootstrapKey);
-  const [tenantId, setTenantId] = useState(defaultConfig.tenantId);
-  const [token, setToken] = useState(defaultConfig.token);
-  const [manualTokenInput, setManualTokenInput] = useState("");
-  const [loginEmail, setLoginEmail] = useState(defaultConfig.loginEmail);
+  const [authMode, setAuthMode] = useState<AuthMode>("signin");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("Ready");
+
+  const [apiBaseUrl, setApiBaseUrl] = useState("http://localhost:4000");
+  const [token, setToken] = useState("");
+  const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
-  const [firstAdminName, setFirstAdminName] = useState("");
-  const [firstAdminTenantName, setFirstAdminTenantName] = useState(defaultConfig.firstAdminTenantName);
-  const [fromDate, setFromDate] = useState(defaultConfig.fromDate);
-  const [toDate, setToDate] = useState(defaultConfig.toDate);
-  const [agentFilter, setAgentFilter] = useState(defaultConfig.agentFilter);
-  const [autoRefreshSeconds, setAutoRefreshSeconds] = useState(defaultConfig.autoRefreshSeconds);
+
+  const [setupName, setSetupName] = useState("");
+  const [setupEmail, setSetupEmail] = useState("");
+  const [setupPassword, setSetupPassword] = useState("");
+  const [setupTenantName, setSetupTenantName] = useState("My Company");
+
+  const [activeView, setActiveView] = useState<ViewKey>("clients");
+  const [tenantId, setTenantId] = useState(defaultTenant);
+  const [tenantSearch, setTenantSearch] = useState("");
+
+  const [tenants, setTenants] = useState<TenantRecord[]>([]);
+  const [tenantSnapshots, setTenantSnapshots] = useState<Record<string, TenantSnapshot>>({});
+  const [newTenantName, setNewTenantName] = useState("");
+
+  const [agents, setAgents] = useState<AgentRecord[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState("");
+  const [agentVersions, setAgentVersions] = useState<AgentVersionRecord[]>([]);
+
+  const [wizardStep, setWizardStep] = useState<WizardStep>(1);
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentLanguage, setNewAgentLanguage] = useState("es");
+  const [newAgentLlmModel, setNewAgentLlmModel] = useState("gpt-4o-mini");
+  const [newAgentSttProvider, setNewAgentSttProvider] = useState("deepgram");
+  const [newAgentTtsProvider, setNewAgentTtsProvider] = useState("rime");
+  const [newAgentVoiceId, setNewAgentVoiceId] = useState("");
+  const [wizardCreateVersion, setWizardCreateVersion] = useState(true);
+  const [wizardPublishNow, setWizardPublishNow] = useState(true);
+  const [newVersionPrompt, setNewVersionPrompt] = useState(
+    "Eres un agente de voz profesional. Responde de forma clara y breve en espanol."
+  );
+  const [newVersionTemperature, setNewVersionTemperature] = useState("0.3");
+
+  const [fromDate, setFromDate] = useState(toLocalDate(7));
+  const [toDate, setToDate] = useState(toLocalDate(0));
+  const [agentFilter, setAgentFilter] = useState("");
+  const [autoRefreshSeconds, setAutoRefreshSeconds] = useState(0);
 
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [kpis, setKpis] = useState<KpiRecord[]>([]);
   const [selectedCallId, setSelectedCallId] = useState("");
   const [events, setEvents] = useState<CallEvent[]>([]);
 
-  const [tenants, setTenants] = useState<TenantRecord[]>([]);
-  const [newTenantName, setNewTenantName] = useState("");
-  const [tenantSearch, setTenantSearch] = useState("");
-  const [tenantSnapshots, setTenantSnapshots] = useState<Record<string, TenantSnapshot>>({});
-
-  const [agents, setAgents] = useState<AgentRecord[]>([]);
-  const [selectedAgentId, setSelectedAgentId] = useState("");
-  const [newAgentName, setNewAgentName] = useState("");
-  const [newAgentLanguage, setNewAgentLanguage] = useState("es");
-  const [newAgentLlmModel, setNewAgentLlmModel] = useState("gpt-4o-mini");
-  const [newAgentSttProvider, setNewAgentSttProvider] = useState("deepgram");
-  const [newAgentTtsProvider, setNewAgentTtsProvider] = useState("rime");
-
-  const [agentVersions, setAgentVersions] = useState<AgentVersionRecord[]>([]);
-  const [newVersionPrompt, setNewVersionPrompt] = useState(
-    "Eres un agente de voz profesional. Responde de forma clara y breve en espanol."
-  );
-  const [newVersionTemperature, setNewVersionTemperature] = useState("0.3");
-  const [wizardStep, setWizardStep] = useState<WizardStep>(1);
-  const [wizardVoiceId, setWizardVoiceId] = useState("");
-  const [wizardCreateVersion, setWizardCreateVersion] = useState(true);
-  const [wizardPublishNow, setWizardPublishNow] = useState(true);
-
-  const [connectorUrl, setConnectorUrl] = useState(defaultConfig.connectorUrl);
-  const [connectorToken, setConnectorToken] = useState(defaultConfig.connectorToken);
-  const [connectorMode, setConnectorMode] = useState("unknown");
-  const [userTurn, setUserTurn] = useState(defaultConfig.userTurn);
-
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("Ready");
-
   const tokenClaims = useMemo(() => parseJwtClaims(token), [token]);
 
-  const selectedCall = useMemo(
-    () => calls.find((call) => call.id === selectedCallId) ?? null,
-    [calls, selectedCallId]
-  );
-
-  const selectedAgent = useMemo(
-    () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
-    [agents, selectedAgentId]
-  );
-
   const tenantOptions = useMemo(() => {
-    const items = [...tenants];
-    if (tenantId && !items.some((tenant) => tenant.id === tenantId)) {
-      items.unshift({
+    const list = [...tenants];
+    if (tenantId && !list.some((tenant) => tenant.id === tenantId)) {
+      list.unshift({
         id: tenantId,
         name: `Current tenant (${tenantId.slice(0, 8)}...)`,
         status: "unknown",
@@ -291,7 +269,7 @@ export function App() {
         created_at: new Date(0).toISOString()
       });
     }
-    return items;
+    return list;
   }, [tenantId, tenants]);
 
   const filteredTenants = useMemo(() => {
@@ -311,15 +289,20 @@ export function App() {
 
   const activeTenant = useMemo(
     () => tenantOptions.find((tenant) => tenant.id === tenantId) ?? null,
-    [tenantId, tenantOptions]
+    [tenantOptions, tenantId]
   );
 
   const activeTenantSnapshot = useMemo(() => tenantSnapshots[tenantId] ?? null, [tenantId, tenantSnapshots]);
 
-  const wizardTemperature = Number(newVersionTemperature);
-  const wizardTemperatureValid = Number.isFinite(wizardTemperature) && wizardTemperature >= 0 && wizardTemperature <= 2;
-  const wizardCanSubmit =
-    newAgentName.trim().length >= 2 && isUuid(tenantId) && (!wizardCreateVersion || (newVersionPrompt.trim().length >= 10 && wizardTemperatureValid));
+  const selectedAgent = useMemo(
+    () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
+    [agents, selectedAgentId]
+  );
+
+  const selectedCall = useMemo(
+    () => calls.find((call) => call.id === selectedCallId) ?? null,
+    [calls, selectedCallId]
+  );
 
   const totals = useMemo(() => {
     let totalCalls = 0;
@@ -337,29 +320,22 @@ export function App() {
       totalCost += asNumber(row.total_cost_usd);
     }
 
-    const avgDurationSec = totalCalls > 0 ? weightedDuration / totalCalls : 0;
-    const resolutionRate = totalCalls > 0 ? weightedResolution / totalCalls : 0;
-    const handoffRate = totalCalls > 0 ? weightedHandoff / totalCalls : 0;
-    const activeCalls = calls.filter((call) => !call.ended_at).length;
-
     return {
       totalCalls,
-      avgDurationSec,
-      resolutionRate,
-      handoffRate,
+      avgDurationSec: totalCalls > 0 ? weightedDuration / totalCalls : 0,
+      resolutionRate: totalCalls > 0 ? weightedResolution / totalCalls : 0,
+      handoffRate: totalCalls > 0 ? weightedHandoff / totalCalls : 0,
       totalCost,
-      activeCalls
+      activeCalls: calls.filter((call) => !call.ended_at).length
     };
   }, [calls, kpis]);
 
-  const usingLocalhostApi = useMemo(() => {
-    if (typeof window === "undefined") {
-      return false;
-    }
-    const appHost = window.location.hostname;
-    const apiLooksLocal = apiBaseUrl.includes("localhost") || apiBaseUrl.includes("127.0.0.1");
-    return appHost !== "localhost" && appHost !== "127.0.0.1" && apiLooksLocal;
-  }, [apiBaseUrl]);
+  const wizardTemperature = Number(newVersionTemperature);
+  const wizardTemperatureValid = Number.isFinite(wizardTemperature) && wizardTemperature >= 0 && wizardTemperature <= 2;
+  const wizardCanSubmit =
+    newAgentName.trim().length >= 2 &&
+    isUuid(tenantId) &&
+    (!wizardCreateVersion || (newVersionPrompt.trim().length >= 10 && wizardTemperatureValid));
 
   useEffect(() => {
     const raw = localStorage.getItem(storageKey);
@@ -372,18 +348,20 @@ export function App() {
       if (typeof parsed.apiBaseUrl === "string") {
         setApiBaseUrl(parsed.apiBaseUrl);
       }
-      if (typeof parsed.bootstrapKey === "string") {
-        setBootstrapKey(parsed.bootstrapKey);
+      if (typeof parsed.token === "string") {
+        setToken(parsed.token);
+      }
+      if (typeof parsed.loginEmail === "string") {
+        setLoginEmail(parsed.loginEmail);
       }
       if (typeof parsed.tenantId === "string") {
         setTenantId(parsed.tenantId);
       }
-      if (typeof parsed.token === "string") {
-        setToken(parsed.token);
-        setManualTokenInput(parsed.token);
+      if (parsed.activeView === "clients" || parsed.activeView === "agents" || parsed.activeView === "operations") {
+        setActiveView(parsed.activeView);
       }
-      if (typeof parsed.loginEmail === "string") {
-        setLoginEmail(parsed.loginEmail);
+      if (typeof parsed.tenantSearch === "string") {
+        setTenantSearch(parsed.tenantSearch);
       }
       if (typeof parsed.fromDate === "string") {
         setFromDate(parsed.fromDate);
@@ -394,23 +372,8 @@ export function App() {
       if (typeof parsed.agentFilter === "string") {
         setAgentFilter(parsed.agentFilter);
       }
-      if (typeof parsed.connectorUrl === "string") {
-        setConnectorUrl(parsed.connectorUrl);
-      }
-      if (typeof parsed.connectorToken === "string") {
-        setConnectorToken(parsed.connectorToken);
-      }
-      if (typeof parsed.userTurn === "string") {
-        setUserTurn(parsed.userTurn);
-      }
       if (typeof parsed.autoRefreshSeconds === "number") {
         setAutoRefreshSeconds(parsed.autoRefreshSeconds);
-      }
-      if (typeof parsed.firstAdminTenantName === "string") {
-        setFirstAdminTenantName(parsed.firstAdminTenantName);
-      }
-      if (parsed.activeView === "workspace" || parsed.activeView === "agents" || parsed.activeView === "operations") {
-        setActiveView(parsed.activeView);
       }
     } catch {
       // ignore malformed localStorage
@@ -420,43 +383,41 @@ export function App() {
   useEffect(() => {
     const payload: PersistedConfig = {
       apiBaseUrl,
-      bootstrapKey,
-      tenantId,
       token,
       loginEmail,
+      tenantId,
+      activeView,
+      tenantSearch,
       fromDate,
       toDate,
       agentFilter,
-      connectorUrl,
-      connectorToken,
-      userTurn,
-      autoRefreshSeconds,
-      firstAdminTenantName,
-      activeView
+      autoRefreshSeconds
     };
-
     localStorage.setItem(storageKey, JSON.stringify(payload));
-  }, [
-    activeView,
-    agentFilter,
-    apiBaseUrl,
-    autoRefreshSeconds,
-    bootstrapKey,
-    connectorToken,
-    connectorUrl,
-    firstAdminTenantName,
-    fromDate,
-    loginEmail,
-    tenantId,
-    toDate,
-    token,
-    userTurn
-  ]);
+  }, [apiBaseUrl, token, loginEmail, tenantId, activeView, tenantSearch, fromDate, toDate, agentFilter, autoRefreshSeconds]);
+
+  useEffect(() => {
+    if (!token || autoRefreshSeconds <= 0 || activeView !== "operations") {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadOperations();
+      if (selectedCallId) {
+        void loadCallEvents(selectedCallId);
+      }
+    }, autoRefreshSeconds * 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [token, autoRefreshSeconds, activeView, selectedCallId, apiBaseUrl, fromDate, toDate, agentFilter]);
 
   function buildClientQuery(): URLSearchParams {
     const params = new URLSearchParams();
     const fromIso = buildIsoFromDate(fromDate, false);
     const toIso = buildIsoFromDate(toDate, true);
+    const trimmedAgentFilter = agentFilter.trim();
 
     if (fromIso) {
       params.set("from", fromIso);
@@ -464,7 +425,6 @@ export function App() {
     if (toIso) {
       params.set("to", toIso);
     }
-    const trimmedAgentFilter = agentFilter.trim();
     if (trimmedAgentFilter && isUuid(trimmedAgentFilter)) {
       params.set("agent_id", trimmedAgentFilter);
     }
@@ -472,209 +432,35 @@ export function App() {
     return params;
   }
 
-  function applyManualToken() {
-    const trimmed = manualTokenInput.trim();
-    if (!trimmed) {
-      setStatus("Paste a JWT first");
-      return;
-    }
-
-    setToken(trimmed);
-    const claims = parseJwtClaims(trimmed);
-    if (claims?.tenant_id) {
-      setTenantId(claims.tenant_id);
-      setStatus(`Manual JWT loaded (tenant ${claims.tenant_id})`);
-      return;
-    }
-
-    setStatus("Manual JWT loaded");
-  }
-
-  function clearToken() {
-    setToken("");
-    setManualTokenInput("");
-    setStatus("JWT cleared");
-  }
-
-  function applyTenantSelection(nextTenantId: string): void {
+  function selectTenant(nextTenantId: string): void {
     setTenantId(nextTenantId);
-    setAgentFilter("");
     setSelectedAgentId("");
     setAgentVersions([]);
   }
 
-  function summarizeCalls(callsList: Array<{ started_at: string; ended_at: string | null; outcome: string | null; handoff_reason: string | null }>): TenantSnapshot {
-    const calls = callsList.length;
-    const activeCalls = callsList.filter((call) => !call.ended_at).length;
-    const resolvedCalls = callsList.filter((call) => call.outcome === "resolved").length;
-    const handoffCalls = callsList.filter((call) => call.outcome === "handoff" || Boolean(call.handoff_reason)).length;
-    const lastStartedAt = callsList[0]?.started_at ?? null;
-
-    return {
-      calls,
-      activeCalls,
-      resolvedCalls,
-      handoffCalls,
-      lastStartedAt
-    };
+  async function fetchTenants(): Promise<TenantRecord[]> {
+    const payload = await requestJson<{ items: TenantRecord[] }>(`${apiBaseUrl}/internal/tenants`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    return payload.items;
   }
 
-  async function loadTenantSnapshot(targetTenantId = tenantId): Promise<void> {
-    if (!token) {
-      setStatus("Sign in first");
-      return;
-    }
-
-    if (!isUuid(targetTenantId)) {
-      setStatus("Select a valid tenant first");
-      return;
-    }
-
-    setBusy(true);
-    setStatus("Loading tenant snapshot...");
-
-    try {
-      const params = new URLSearchParams({ tenant_id: targetTenantId, limit: "200" });
-      const payload = await requestJson<{
-        items: Array<{
-          started_at: string;
-          ended_at: string | null;
-          outcome: string | null;
-          handoff_reason: string | null;
-        }>;
-      }>(`${apiBaseUrl}/internal/calls?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      const summary = summarizeCalls(payload.items);
-      setTenantSnapshots((current) => ({
-        ...current,
-        [targetTenantId]: summary
-      }));
-      setStatus(`Tenant snapshot loaded (${summary.calls} calls)`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not load tenant snapshot");
-    } finally {
-      setBusy(false);
-    }
+  async function fetchAgentsByTenant(targetTenantId: string): Promise<AgentRecord[]> {
+    const params = new URLSearchParams({ tenant_id: targetTenantId, limit: "200" });
+    const payload = await requestJson<{ items: AgentRecord[] }>(`${apiBaseUrl}/internal/agents?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    return payload.items;
   }
 
-  async function registerFirstAdmin(event: FormEvent) {
-    event.preventDefault();
-
-    const email = loginEmail.trim();
-    const password = loginPassword;
-    const name = firstAdminName.trim();
-    const tenantName = firstAdminTenantName.trim();
-
-    if (!email || !password || !name || !tenantName) {
-      setStatus("Complete name, email, password and tenant name");
-      return;
-    }
-
-    setBusy(true);
-    setStatus("Registering first admin...");
-    try {
-      const payload = await requestJson<{
-        token: string;
-        membership: { tenant_id: string };
-      }>(`${apiBaseUrl}/auth/register-first-admin`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          password,
-          name,
-          tenant_name: tenantName,
-          timezone: "UTC",
-          plan: "starter"
-        })
-      });
-
-      setToken(payload.token);
-      setManualTokenInput(payload.token);
-      setTenantId(payload.membership.tenant_id);
-      setLoginPassword("");
-      setStatus("First admin ready. You are signed in.");
-      setActiveView("workspace");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not register first admin");
-    } finally {
-      setBusy(false);
-    }
+  async function fetchVersionsByAgent(agentId: string): Promise<AgentVersionRecord[]> {
+    const payload = await requestJson<{ items: AgentVersionRecord[] }>(`${apiBaseUrl}/internal/agents/${agentId}/versions`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    return payload.items;
   }
 
-  async function loginWithPassword(event: FormEvent) {
-    event.preventDefault();
-
-    const email = loginEmail.trim();
-    const password = loginPassword;
-    if (!email || !password) {
-      setStatus("Enter email and password");
-      return;
-    }
-
-    setBusy(true);
-    setStatus("Signing in...");
-    try {
-      const payload = await requestJson<{
-        token: string;
-        active_membership: { tenant_id: string; role: string };
-      }>(`${apiBaseUrl}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          password,
-          tenant_id: isUuid(tenantId) ? tenantId : undefined
-        })
-      });
-
-      setToken(payload.token);
-      setManualTokenInput(payload.token);
-      if (payload.active_membership?.tenant_id) {
-        setTenantId(payload.active_membership.tenant_id);
-      }
-      setLoginPassword("");
-      setStatus(`Signed in as ${email}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not sign in");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function bootstrapDevToken(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setStatus("Issuing dev token...");
-    try {
-      const payload = await requestJson<{ token: string }>(`${apiBaseUrl}/internal/dev/token`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-dev-bootstrap-key": bootstrapKey
-        },
-        body: JSON.stringify({
-          user_id: "ops-debug-user",
-          tenant_id: tenantId,
-          role: "internal_admin",
-          is_internal: true,
-          expires_in: "2h"
-        })
-      });
-
-      setToken(payload.token);
-      setManualTokenInput(payload.token);
-      setStatus("Dev token ready");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not issue dev token");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function loadTenants() {
+  async function loadTenants(): Promise<void> {
     if (!token) {
       setStatus("Sign in first");
       return;
@@ -683,14 +469,12 @@ export function App() {
     setBusy(true);
     setStatus("Loading tenants...");
     try {
-      const payload = await requestJson<{ items: TenantRecord[] }>(`${apiBaseUrl}/internal/tenants`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setTenants(payload.items);
-      if (payload.items.length > 0 && !payload.items.some((tenant) => tenant.id === tenantId)) {
-        setTenantId(payload.items[0].id);
+      const items = await fetchTenants();
+      setTenants(items);
+      if (items.length > 0 && !items.some((tenant) => tenant.id === tenantId)) {
+        setTenantId(items[0].id);
       }
-      setStatus(`Loaded ${payload.items.length} tenants`);
+      setStatus(`Loaded ${items.length} tenants`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not load tenants");
     } finally {
@@ -698,8 +482,39 @@ export function App() {
     }
   }
 
-  async function createTenant(event: FormEvent) {
+  async function loadTenantSnapshot(targetTenantId = tenantId): Promise<void> {
+    if (!token) {
+      setStatus("Sign in first");
+      return;
+    }
+    if (!isUuid(targetTenantId)) {
+      setStatus("Select a valid tenant first");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Loading tenant snapshot...");
+    try {
+      const params = new URLSearchParams({ tenant_id: targetTenantId, limit: "200" });
+      const payload = await requestJson<{
+        items: Array<{ started_at: string; ended_at: string | null; outcome: string | null; handoff_reason: string | null }>;
+      }>(`${apiBaseUrl}/internal/calls?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      const summary = summarizeCalls(payload.items);
+      setTenantSnapshots((current) => ({ ...current, [targetTenantId]: summary }));
+      setStatus(`Tenant snapshot loaded (${summary.calls} calls)`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load tenant snapshot");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createTenant(event: FormEvent): Promise<void> {
     event.preventDefault();
+
     if (!token) {
       setStatus("Sign in first");
       return;
@@ -723,9 +538,9 @@ export function App() {
         body: JSON.stringify({ name, timezone: "UTC", plan: "starter" })
       });
 
+      setTenants((current) => [tenant, ...current]);
       setNewTenantName("");
-      setTenantId(tenant.id);
-      await loadTenants();
+      selectTenant(tenant.id);
       setStatus(`Tenant created: ${tenant.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not create tenant");
@@ -734,7 +549,7 @@ export function App() {
     }
   }
 
-  async function loadAgents(targetTenantId = tenantId) {
+  async function loadAgents(targetTenantId = tenantId): Promise<void> {
     if (!token) {
       setStatus("Sign in first");
       return;
@@ -747,19 +562,15 @@ export function App() {
     setBusy(true);
     setStatus("Loading agents...");
     try {
-      const params = new URLSearchParams({ tenant_id: targetTenantId, limit: "200" });
-      const payload = await requestJson<{ items: AgentRecord[] }>(`${apiBaseUrl}/internal/agents?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      setAgents(payload.items);
-      const keepSelected = payload.items.some((agent) => agent.id === selectedAgentId);
-      const nextAgentId = keepSelected ? selectedAgentId : payload.items[0]?.id ?? "";
+      const items = await fetchAgentsByTenant(targetTenantId);
+      setAgents(items);
+      const keepSelected = items.some((agent) => agent.id === selectedAgentId);
+      const nextAgentId = keepSelected ? selectedAgentId : items[0]?.id ?? "";
       setSelectedAgentId(nextAgentId);
       if (!nextAgentId) {
         setAgentVersions([]);
       }
-      setStatus(`Loaded ${payload.items.length} agents`);
+      setStatus(`Loaded ${items.length} agents`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not load agents");
     } finally {
@@ -767,40 +578,38 @@ export function App() {
     }
   }
 
-  async function createAgentFromWizard(event: FormEvent) {
+  async function loadAgentVersions(agentId: string): Promise<void> {
+    if (!token || !agentId) {
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Loading agent versions...");
+    try {
+      const items = await fetchVersionsByAgent(agentId);
+      setAgentVersions(items);
+      setStatus(`Loaded ${items.length} versions`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load versions");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createAgentWorkflow(event: FormEvent): Promise<void> {
     event.preventDefault();
 
     if (!token) {
       setStatus("Sign in first");
       return;
     }
-
-    if (!isUuid(tenantId)) {
-      setStatus("Select a valid tenant first");
+    if (!wizardCanSubmit) {
+      setStatus("Please complete the required wizard fields");
       return;
-    }
-
-    const agentName = newAgentName.trim();
-    if (agentName.length < 2) {
-      setStatus("Agent name must have at least 2 chars");
-      return;
-    }
-
-    if (wizardCreateVersion) {
-      if (newVersionPrompt.trim().length < 10) {
-        setStatus("System prompt must have at least 10 chars");
-        return;
-      }
-
-      if (!wizardTemperatureValid) {
-        setStatus("Temperature must be between 0 and 2");
-        return;
-      }
     }
 
     setBusy(true);
     setStatus("Creating agent workflow...");
-
     try {
       const agent = await requestJson<AgentRecord>(`${apiBaseUrl}/internal/agents`, {
         method: "POST",
@@ -810,16 +619,15 @@ export function App() {
         },
         body: JSON.stringify({
           tenant_id: tenantId,
-          name: agentName,
+          name: newAgentName.trim(),
           language: newAgentLanguage,
           llm_model: newAgentLlmModel,
           stt_provider: newAgentSttProvider,
           tts_provider: newAgentTtsProvider,
-          voice_id: wizardVoiceId.trim() || undefined
+          voice_id: newAgentVoiceId.trim() || undefined
         })
       });
 
-      let versionCreated = false;
       if (wizardCreateVersion) {
         const version = await requestJson<AgentVersionRecord>(`${apiBaseUrl}/internal/agents/${agent.id}/versions`, {
           method: "POST",
@@ -833,7 +641,6 @@ export function App() {
           })
         });
 
-        versionCreated = true;
         if (wizardPublishNow) {
           await requestJson(`${apiBaseUrl}/internal/agents/${agent.id}/versions/${version.id}/publish`, {
             method: "POST",
@@ -842,94 +649,34 @@ export function App() {
         }
       }
 
-      await loadAgents(tenantId);
+      const updatedAgents = await fetchAgentsByTenant(tenantId);
+      setAgents(updatedAgents);
       setSelectedAgentId(agent.id);
-      await loadAgentVersions(agent.id);
+
+      const updatedVersions = await fetchVersionsByAgent(agent.id);
+      setAgentVersions(updatedVersions);
 
       setWizardStep(1);
       setNewAgentName("");
-      setWizardVoiceId("");
+      setNewAgentVoiceId("");
 
       setStatus(
-        versionCreated
+        wizardCreateVersion
           ? wizardPublishNow
             ? `Agent ${agent.name} created and published`
             : `Agent ${agent.name} created with draft version`
           : `Agent ${agent.name} created`
       );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not create agent from wizard");
+      setStatus(error instanceof Error ? error.message : "Could not create agent workflow");
     } finally {
       setBusy(false);
     }
   }
 
-  async function loadAgentVersions(agentId: string) {
-    if (!token || !agentId) {
-      return;
-    }
-
-    setBusy(true);
-    setStatus("Loading agent versions...");
-    try {
-      const payload = await requestJson<{ items: AgentVersionRecord[] }>(
-        `${apiBaseUrl}/internal/agents/${agentId}/versions`,
-        {
-          headers: { Authorization: `Bearer ${token}` }
-        }
-      );
-      setAgentVersions(payload.items);
-      setStatus(`Loaded ${payload.items.length} versions`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not load agent versions");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function createAgentVersion(event: FormEvent) {
-    event.preventDefault();
+  async function publishVersion(versionId: string): Promise<void> {
     if (!token || !selectedAgentId) {
-      setStatus("Select an agent and sign in first");
-      return;
-    }
-
-    const prompt = newVersionPrompt.trim();
-    if (prompt.length < 10) {
-      setStatus("System prompt must have at least 10 chars");
-      return;
-    }
-
-    const temperature = Number(newVersionTemperature);
-    if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
-      setStatus("Temperature must be between 0 and 2");
-      return;
-    }
-
-    setBusy(true);
-    setStatus("Creating agent version...");
-    try {
-      await requestJson(`${apiBaseUrl}/internal/agents/${selectedAgentId}/versions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ system_prompt: prompt, temperature })
-      });
-
-      await loadAgentVersions(selectedAgentId);
-      setStatus("Agent version created");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not create version");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function publishAgentVersion(versionId: string) {
-    if (!token || !selectedAgentId) {
-      setStatus("Select an agent and sign in first");
+      setStatus("Select an agent first");
       return;
     }
 
@@ -941,7 +688,8 @@ export function App() {
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      await loadAgentVersions(selectedAgentId);
+      const items = await fetchVersionsByAgent(selectedAgentId);
+      setAgentVersions(items);
       setStatus("Version published");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not publish version");
@@ -950,22 +698,23 @@ export function App() {
     }
   }
 
-  async function loadDashboard() {
+  async function loadOperations(): Promise<void> {
     if (!token) {
       setStatus("Sign in first");
       return;
     }
 
     setBusy(true);
-    setStatus("Loading KPI and calls...");
+    setStatus("Loading operations...");
     try {
       const query = buildClientQuery().toString();
-      const callsUrl = `${apiBaseUrl}/client/calls${query ? `?${query}` : ""}`;
-      const kpisUrl = `${apiBaseUrl}/client/kpis${query ? `?${query}` : ""}`;
-
       const [callsPayload, kpisPayload] = await Promise.all([
-        requestJson<{ items: CallRecord[] }>(callsUrl, { headers: { Authorization: `Bearer ${token}` } }),
-        requestJson<{ items: KpiRecord[] }>(kpisUrl, { headers: { Authorization: `Bearer ${token}` } })
+        requestJson<{ items: CallRecord[] }>(`${apiBaseUrl}/client/calls${query ? `?${query}` : ""}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        }),
+        requestJson<{ items: KpiRecord[] }>(`${apiBaseUrl}/client/kpis${query ? `?${query}` : ""}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        })
       ]);
 
       setCalls(callsPayload.items);
@@ -980,13 +729,13 @@ export function App() {
 
       setStatus(`Loaded ${callsPayload.items.length} calls and ${kpisPayload.items.length} KPI rows`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not load dashboard");
+      setStatus(error instanceof Error ? error.message : "Could not load operations");
     } finally {
       setBusy(false);
     }
   }
 
-  async function loadEvents(callId: string) {
+  async function loadCallEvents(callId: string): Promise<void> {
     if (!token || !callId) {
       return;
     }
@@ -997,381 +746,399 @@ export function App() {
       const payload = await requestJson<{ items: CallEvent[] }>(`${apiBaseUrl}/internal/calls/${callId}/events`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-
       setEvents(payload.items);
       setStatus(`Loaded ${payload.items.length} events`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not load events");
+      setStatus(error instanceof Error ? error.message : "Could not load call timeline");
     } finally {
       setBusy(false);
     }
   }
 
-  async function checkConnectorMode() {
-    setBusy(true);
-    setStatus("Checking connector mode...");
-    try {
-      const payload = await requestJson<{ mode: string }>(`${connectorUrl}/runtime/ai-mode`, {
-        headers: { Authorization: `Bearer ${connectorToken}` }
-      });
-      setConnectorMode(payload.mode);
-      setStatus(`Connector mode: ${payload.mode}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not read connector mode");
-    } finally {
-      setBusy(false);
-    }
-  }
+  async function loginWithPassword(event: FormEvent): Promise<void> {
+    event.preventDefault();
 
-  async function sendUserTurn() {
-    if (!selectedCallId) {
-      setStatus("Select a call first");
-      return;
-    }
-
-    const text = userTurn.trim();
-    if (!text) {
-      setStatus("Write a user message first");
+    const email = loginEmail.trim();
+    if (!email || !loginPassword) {
+      setStatus("Enter email and password");
       return;
     }
 
     setBusy(true);
-    setStatus("Sending user turn to connector...");
+    setStatus("Signing in...");
     try {
-      await requestJson(`${connectorUrl}/runtime/sessions/${selectedCallId}/user-turn`, {
+      const payload = await requestJson<{
+        token: string;
+        active_membership?: { tenant_id: string };
+      }>(`${apiBaseUrl}/auth/login`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${connectorToken}`
-        },
-        body: JSON.stringify({ text })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          password: loginPassword,
+          tenant_id: isUuid(tenantId) ? tenantId : undefined
+        })
       });
 
-      await loadEvents(selectedCallId);
-      setStatus("User turn processed");
+      setToken(payload.token);
+      if (payload.active_membership?.tenant_id) {
+        setTenantId(payload.active_membership.tenant_id);
+      }
+      setLoginPassword("");
+      setStatus(`Signed in as ${email}`);
+
+      const loadedTenants = await fetchTenants();
+      setTenants(loadedTenants);
+      if (loadedTenants.length > 0 && !loadedTenants.some((tenant) => tenant.id === tenantId)) {
+        setTenantId(loadedTenants[0].id);
+      }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not send user turn");
+      setStatus(error instanceof Error ? error.message : "Could not sign in");
     } finally {
       setBusy(false);
     }
   }
 
-  useEffect(() => {
-    if (!token || autoRefreshSeconds <= 0 || activeView !== "operations") {
+  async function registerFirstAdmin(event: FormEvent): Promise<void> {
+    event.preventDefault();
+
+    const name = setupName.trim();
+    const email = setupEmail.trim();
+    const tenantName = setupTenantName.trim();
+    if (!name || !email || !setupPassword || !tenantName) {
+      setStatus("Complete all setup fields");
       return;
     }
 
-    const interval = window.setInterval(() => {
-      void loadDashboard();
-      if (selectedCallId) {
-        void loadEvents(selectedCallId);
-      }
-    }, autoRefreshSeconds * 1000);
+    setBusy(true);
+    setStatus("Creating first admin...");
+    try {
+      const payload = await requestJson<{
+        token: string;
+        membership: { tenant_id: string };
+      }>(`${apiBaseUrl}/auth/register-first-admin`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          name,
+          password: setupPassword,
+          tenant_name: tenantName,
+          timezone: "UTC",
+          plan: "starter"
+        })
+      });
 
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [activeView, autoRefreshSeconds, selectedCallId, token, apiBaseUrl, fromDate, toDate, agentFilter]);
+      setToken(payload.token);
+      setTenantId(payload.membership.tenant_id);
+      setLoginEmail(email);
+      setStatus("First admin created. You are signed in.");
+
+      const loadedTenants = await fetchTenants();
+      setTenants(loadedTenants);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not complete setup");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function logout(): void {
+    setToken("");
+    setLoginPassword("");
+    setStatus("Signed out");
+  }
+
+  if (!token) {
+    return (
+      <div className="auth-shell">
+        <section className="auth-brand">
+          <p className="tag">Voice Agent SaaS</p>
+          <h1>Operator Portal</h1>
+          <p>
+            Un solo lugar para administrar clientes, crear agentes y monitorear llamadas. Sin copiar JWT ni pasos tecnicos.
+          </p>
+          <ul>
+            <li>Login con email/password</li>
+            <li>Setup inicial de primer admin</li>
+            <li>Panel modular por dominio: clientes, agentes, operaciones</li>
+          </ul>
+        </section>
+
+        <section className="auth-card">
+          <header>
+            <h2>{authMode === "signin" ? "Sign In" : "First-Time Setup"}</h2>
+            <p>{authMode === "signin" ? "Accede con tus credenciales" : "Crea el primer admin y tenant"}</p>
+          </header>
+
+          <div className="auth-switch">
+            <button className={authMode === "signin" ? "active" : ""} onClick={() => setAuthMode("signin")} type="button">
+              Sign In
+            </button>
+            <button className={authMode === "setup" ? "active" : ""} onClick={() => setAuthMode("setup")} type="button">
+              First Setup
+            </button>
+          </div>
+
+          {authMode === "signin" ? (
+            <form className="auth-form" onSubmit={loginWithPassword}>
+              <label>
+                API endpoint
+                <input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} />
+              </label>
+              <label>
+                Email
+                <input value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} placeholder="you@company.com" />
+              </label>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(event) => setLoginPassword(event.target.value)}
+                  placeholder="your password"
+                />
+              </label>
+              <button disabled={busy} type="submit">
+                {busy ? "Signing in..." : "Sign In"}
+              </button>
+            </form>
+          ) : (
+            <form className="auth-form" onSubmit={registerFirstAdmin}>
+              <label>
+                API endpoint
+                <input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} />
+              </label>
+              <label>
+                Admin name
+                <input value={setupName} onChange={(event) => setSetupName(event.target.value)} placeholder="Owner" />
+              </label>
+              <label>
+                Admin email
+                <input value={setupEmail} onChange={(event) => setSetupEmail(event.target.value)} placeholder="owner@company.com" />
+              </label>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={setupPassword}
+                  onChange={(event) => setSetupPassword(event.target.value)}
+                  placeholder="minimum 10 chars"
+                />
+              </label>
+              <label>
+                Tenant name
+                <input
+                  value={setupTenantName}
+                  onChange={(event) => setSetupTenantName(event.target.value)}
+                  placeholder="My Company"
+                />
+              </label>
+              <button disabled={busy} type="submit">
+                {busy ? "Setting up..." : "Create Admin"}
+              </button>
+            </form>
+          )}
+
+          <footer>
+            <strong>Status:</strong> {status}
+          </footer>
+        </section>
+      </div>
+    );
+  }
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
+    <div className="app-shell">
+      <aside className="app-sidebar">
         <div>
-          <p className="eyebrow">Voice Agent SaaS</p>
+          <p className="tag">Voice Agent SaaS</p>
           <h1>Operator Portal</h1>
-          <p className="muted">Administra clientes, agentes y operacion desde un flujo separado por modulo.</p>
+          <p>Manage clients, build agents, and monitor calls.</p>
         </div>
 
-        <nav className="nav-grid">
-          <button className={activeView === "workspace" ? "active" : ""} onClick={() => setActiveView("workspace")} type="button">
-            Workspace
+        <nav>
+          <button className={activeView === "clients" ? "active" : ""} onClick={() => setActiveView("clients")} type="button">
+            Clients
           </button>
           <button className={activeView === "agents" ? "active" : ""} onClick={() => setActiveView("agents")} type="button">
-            Agent Builder
+            Agents
           </button>
-          <button className={activeView === "operations" ? "active" : ""} onClick={() => setActiveView("operations")} type="button">
+          <button
+            className={activeView === "operations" ? "active" : ""}
+            onClick={() => setActiveView("operations")}
+            type="button"
+          >
             Operations
           </button>
         </nav>
 
-        <div className="sidebar-meta">
+        <div className="sidebar-foot">
           <small>
-            <strong>Tenant:</strong> {tenantId || "-"}
-          </small>
-          <small>
-            <strong>User:</strong> {tokenClaims?.sub ?? "not signed"}
+            <strong>User:</strong> {tokenClaims?.sub ?? "-"}
           </small>
           <small>
             <strong>Role:</strong> {tokenClaims?.role ?? "-"}
           </small>
+          <button onClick={logout} type="button">
+            Logout
+          </button>
         </div>
       </aside>
 
-      <main className="content">
-        <header className="content-header">
+      <main className="app-content">
+        <header className="topbar">
           <div>
-            <h2>
-              {activeView === "workspace"
-                ? "Workspace Setup"
-                : activeView === "agents"
-                  ? "Agent Builder"
-                  : "Operations Console"}
-            </h2>
-            <p>
-              {activeView === "workspace"
-                ? "Sign-in, tenant onboarding and security setup."
-                : activeView === "agents"
-                  ? "Create agents, version prompts, and publish production behavior."
-                  : "Monitor KPI health, call timelines, and runtime connector behavior."}
-            </p>
+            <h2>{activeView === "clients" ? "Clients" : activeView === "agents" ? "Agent Builder" : "Operations"}</h2>
+            <p>{activeView === "clients" ? "Tenant CRM and onboarding" : activeView === "agents" ? "Guided setup and versioning" : "Live KPIs and call timeline"}</p>
           </div>
-          <span className={`status-pill ${busy ? "busy" : ""}`}>{busy ? "Working" : "Idle"}</span>
+
+          <div className="topbar-actions">
+            <label>
+              Active tenant
+              <select value={tenantId} onChange={(event) => selectTenant(event.target.value)}>
+                {tenantOptions.map((tenant) => (
+                  <option key={tenant.id} value={tenant.id}>
+                    {tenant.name} ({tenant.id.slice(0, 8)}...)
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button disabled={busy} onClick={() => void loadTenants()} type="button">
+              Refresh Tenants
+            </button>
+          </div>
         </header>
 
-        <section className="status-panel">
+        <section className="status-strip">
           <span>
-            Auth: <strong>{token ? "Ready" : "Missing token"}</strong>
+            Session: <strong>{token ? "Active" : "Missing"}</strong>
           </span>
           <span>
-            JWT: <code>{token ? `${token.slice(0, 30)}...` : "not issued"}</code>
+            Tenant: <strong>{tenantId}</strong>
           </span>
-          <span>Status: {status}</span>
+          <span>
+            Status: <strong>{status}</strong>
+          </span>
+          <span>{busy ? "Working..." : "Idle"}</span>
         </section>
 
-        {activeView === "workspace" ? (
+        {activeView === "clients" ? (
           <>
             <section className="panel">
-              <div className="panel-title-row">
-                <h3>Portal Sign-In</h3>
-                <small>No necesitas pegar JWT manual para uso normal.</small>
+              <div className="panel-head">
+                <h3>Tenant CRM</h3>
+                <small>Search, select, and inspect client accounts.</small>
               </div>
-
-              <form className="form-grid" onSubmit={loginWithPassword}>
-                <label>
-                  API Base URL
-                  <input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} />
-                </label>
-                <label>
-                  Email
-                  <input value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} placeholder="you@company.com" />
-                </label>
-                <label>
-                  Password
-                  <input
-                    type="password"
-                    value={loginPassword}
-                    onChange={(event) => setLoginPassword(event.target.value)}
-                    placeholder="your password"
-                  />
-                </label>
-                <button disabled={busy} type="submit">
-                  Sign In
-                </button>
-              </form>
-
-              <form className="form-grid soft" onSubmit={registerFirstAdmin}>
-                <label>
-                  First admin name
-                  <input
-                    value={firstAdminName}
-                    onChange={(event) => setFirstAdminName(event.target.value)}
-                    placeholder="Owner"
-                  />
-                </label>
-                <label>
-                  First tenant name
-                  <input
-                    value={firstAdminTenantName}
-                    onChange={(event) => setFirstAdminTenantName(event.target.value)}
-                    placeholder="My Company"
-                  />
-                </label>
-                <button disabled={busy} type="submit">
-                  Register First Admin
-                </button>
-              </form>
-            </section>
-
-            <section className="panel">
-              <div className="panel-title-row">
-                <h3>Client Workspace</h3>
-                <small>CRM view for tenants, health snapshot, and onboarding.</small>
-              </div>
-
               <div className="form-grid">
                 <label>
-                  Search tenant
+                  Search
                   <input
                     value={tenantSearch}
                     onChange={(event) => setTenantSearch(event.target.value)}
                     placeholder="name, id, plan"
                   />
                 </label>
-                <label>
-                  Active tenant
-                  <select value={tenantId} onChange={(event) => applyTenantSelection(event.target.value)}>
-                    {tenantOptions.map((tenant) => (
-                      <option key={tenant.id} value={tenant.id}>
-                        {tenant.name} ({tenant.id.slice(0, 8)}...)
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button disabled={busy || !token} onClick={() => void loadTenants()} type="button">
-                  Load Tenants
-                </button>
-                <button disabled={busy || !token || !isUuid(tenantId)} onClick={() => void loadTenantSnapshot()} type="button">
+                <button disabled={busy} onClick={() => void loadTenantSnapshot()} type="button">
                   Refresh Snapshot
                 </button>
-                <button disabled={busy || !token || !isUuid(tenantId)} onClick={() => void loadAgents(tenantId)} type="button">
+                <button disabled={busy} onClick={() => void loadAgents()} type="button">
                   Load Tenant Agents
                 </button>
               </div>
 
-              <div className="split-panel crm-split">
-                <div>
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Tenant</th>
-                          <th>Plan</th>
-                          <th>Status</th>
-                          <th>Created</th>
-                          <th></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filteredTenants.map((tenant) => {
-                          const isActiveTenant = tenant.id === tenantId;
-                          const snapshot = tenantSnapshots[tenant.id];
-                          return (
-                            <tr key={tenant.id} className={isActiveTenant ? "row-active" : ""}>
-                              <td>
-                                <strong>{tenant.name}</strong>
-                                <br />
-                                <small>{tenant.id}</small>
-                                {snapshot ? <small>Calls(200): {snapshot.calls}</small> : null}
-                              </td>
-                              <td>{tenant.plan}</td>
-                              <td>{tenant.status}</td>
-                              <td>{formatDateTime(tenant.created_at)}</td>
-                              <td>
-                                <button
-                                  disabled={busy}
-                                  onClick={() => {
-                                    applyTenantSelection(tenant.id);
-                                    void loadTenantSnapshot(tenant.id);
-                                  }}
-                                  type="button"
-                                >
-                                  Open
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+              <div className="split two-col">
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Tenant</th>
+                        <th>Plan</th>
+                        <th>Status</th>
+                        <th>Created</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredTenants.map((tenant) => {
+                        const snapshot = tenantSnapshots[tenant.id];
+                        return (
+                          <tr key={tenant.id} className={tenant.id === tenantId ? "row-active" : ""}>
+                            <td>
+                              <strong>{tenant.name}</strong>
+                              <small>{tenant.id}</small>
+                              {snapshot ? <small>Calls(200): {snapshot.calls}</small> : null}
+                            </td>
+                            <td>{tenant.plan}</td>
+                            <td>{tenant.status}</td>
+                            <td>{formatDateTime(tenant.created_at)}</td>
+                            <td>
+                              <button
+                                disabled={busy}
+                                onClick={() => {
+                                  selectTenant(tenant.id);
+                                  void loadTenantSnapshot(tenant.id);
+                                }}
+                                type="button"
+                              >
+                                Open
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
 
-                <div className="panel subpanel">
-                  <div className="panel-title-row">
-                    <h3>Tenant Detail</h3>
-                    <small>{activeTenant?.name ?? "Select tenant"}</small>
-                  </div>
-
+                <div className="detail-card">
+                  <h4>{activeTenant?.name ?? "No tenant selected"}</h4>
                   {activeTenant ? (
-                    <>
-                      <div className="detail-grid">
-                        <small>
-                          <strong>Tenant ID:</strong> {activeTenant.id}
-                        </small>
-                        <small>
-                          <strong>Plan:</strong> {activeTenant.plan}
-                        </small>
-                        <small>
-                          <strong>Status:</strong> {activeTenant.status}
-                        </small>
-                        <small>
-                          <strong>Timezone:</strong> {activeTenant.timezone}
-                        </small>
-                        <small>
-                          <strong>Created:</strong> {formatDateTime(activeTenant.created_at)}
-                        </small>
-                        <small>
-                          <strong>Agents loaded:</strong> {agents.filter((agent) => agent.tenant_id === activeTenant.id).length}
-                        </small>
-                        <small>
-                          <strong>Calls sample:</strong> {activeTenantSnapshot?.calls ?? "-"}
-                        </small>
-                        <small>
-                          <strong>Resolved sample:</strong> {activeTenantSnapshot?.resolvedCalls ?? "-"}
-                        </small>
-                        <small>
-                          <strong>Handoff sample:</strong> {activeTenantSnapshot?.handoffCalls ?? "-"}
-                        </small>
-                        <small>
-                          <strong>Active sample:</strong> {activeTenantSnapshot?.activeCalls ?? "-"}
-                        </small>
+                    <div className="metric-grid">
+                      <div>
+                        <small>Plan</small>
+                        <strong>{activeTenant.plan}</strong>
                       </div>
-
-                      <form className="form-grid soft" onSubmit={createTenant}>
-                        <label>
-                          New tenant name
-                          <input
-                            value={newTenantName}
-                            onChange={(event) => setNewTenantName(event.target.value)}
-                            placeholder="Acme Dental"
-                          />
-                        </label>
-                        <button disabled={busy || !token} type="submit">
-                          Create Tenant
-                        </button>
-                      </form>
-                    </>
+                      <div>
+                        <small>Status</small>
+                        <strong>{activeTenant.status}</strong>
+                      </div>
+                      <div>
+                        <small>Calls sample</small>
+                        <strong>{activeTenantSnapshot?.calls ?? "-"}</strong>
+                      </div>
+                      <div>
+                        <small>Resolved sample</small>
+                        <strong>{activeTenantSnapshot?.resolvedCalls ?? "-"}</strong>
+                      </div>
+                      <div>
+                        <small>Handoff sample</small>
+                        <strong>{activeTenantSnapshot?.handoffCalls ?? "-"}</strong>
+                      </div>
+                      <div>
+                        <small>Active sample</small>
+                        <strong>{activeTenantSnapshot?.activeCalls ?? "-"}</strong>
+                      </div>
+                    </div>
                   ) : (
-                    <p className="muted">Select a tenant row to view CRM detail.</p>
+                    <p>Select a tenant to see details.</p>
                   )}
+
+                  <form className="form-grid soft" onSubmit={createTenant}>
+                    <label>
+                      New tenant name
+                      <input
+                        value={newTenantName}
+                        onChange={(event) => setNewTenantName(event.target.value)}
+                        placeholder="Acme Dental"
+                      />
+                    </label>
+                    <button disabled={busy} type="submit">
+                      Create Tenant
+                    </button>
+                  </form>
                 </div>
               </div>
-            </section>
-
-            <section className="panel">
-              <details>
-                <summary>Advanced token tools (dev and emergency fallback)</summary>
-                <form className="form-grid" onSubmit={bootstrapDevToken}>
-                  <label>
-                    Dev bootstrap key
-                    <input value={bootstrapKey} onChange={(event) => setBootstrapKey(event.target.value)} />
-                  </label>
-                  <button disabled={busy} type="submit">
-                    Issue Dev JWT
-                  </button>
-                </form>
-
-                <div className="form-grid">
-                  <label>
-                    Manual JWT
-                    <input
-                      value={manualTokenInput}
-                      onChange={(event) => setManualTokenInput(event.target.value)}
-                      placeholder="paste bearer token"
-                    />
-                  </label>
-                  <button disabled={busy} onClick={applyManualToken} type="button">
-                    Use Manual JWT
-                  </button>
-                  <button disabled={busy || !token} onClick={clearToken} type="button">
-                    Clear JWT
-                  </button>
-                </div>
-              </details>
-
-              {usingLocalhostApi ? (
-                <p className="warning">Estas en Railway pero el API apunta a localhost. Cambia a tu dominio publico.</p>
-              ) : null}
             </section>
           </>
         ) : null}
@@ -1379,34 +1146,29 @@ export function App() {
         {activeView === "agents" ? (
           <>
             <section className="panel">
-              <div className="panel-title-row">
-                <h3>Agent Builder Wizard</h3>
-                <small>Create agent and initial prompt flow in guided steps.</small>
+              <div className="panel-head">
+                <h3>Agent Wizard</h3>
+                <small>Simple 3-step flow to create and publish an agent.</small>
               </div>
 
-              <div className="wizard-steps">
+              <div className="stepper">
                 <button className={wizardStep === 1 ? "active" : ""} onClick={() => setWizardStep(1)} type="button">
                   1. Identity
                 </button>
                 <button className={wizardStep === 2 ? "active" : ""} onClick={() => setWizardStep(2)} type="button">
-                  2. Speech + Model
+                  2. Voice + Model
                 </button>
                 <button className={wizardStep === 3 ? "active" : ""} onClick={() => setWizardStep(3)} type="button">
                   3. Prompt + Publish
                 </button>
               </div>
 
-              <form className="wizard-panel" onSubmit={createAgentFromWizard}>
+              <form className="wizard" onSubmit={createAgentWorkflow}>
                 {wizardStep === 1 ? (
                   <div className="form-grid">
                     <label>
-                      Active tenant
-                      <select
-                        value={tenantId}
-                        onChange={(event) => {
-                          applyTenantSelection(event.target.value);
-                        }}
-                      >
+                      Tenant
+                      <select value={tenantId} onChange={(event) => selectTenant(event.target.value)}>
                         {tenantOptions.map((tenant) => (
                           <option key={tenant.id} value={tenant.id}>
                             {tenant.name} ({tenant.id.slice(0, 8)}...)
@@ -1445,7 +1207,11 @@ export function App() {
                     </label>
                     <label>
                       Voice ID (optional)
-                      <input value={wizardVoiceId} onChange={(event) => setWizardVoiceId(event.target.value)} placeholder="voice_123" />
+                      <input
+                        value={newAgentVoiceId}
+                        onChange={(event) => setNewAgentVoiceId(event.target.value)}
+                        placeholder="voice_123"
+                      />
                     </label>
                   </div>
                 ) : null}
@@ -1453,7 +1219,7 @@ export function App() {
                 {wizardStep === 3 ? (
                   <div className="form-grid">
                     <label>
-                      Create initial version
+                      Create first version
                       <select
                         value={wizardCreateVersion ? "yes" : "no"}
                         onChange={(event) => setWizardCreateVersion(event.target.value === "yes")}
@@ -1463,7 +1229,7 @@ export function App() {
                       </select>
                     </label>
                     <label>
-                      Publish after create
+                      Publish immediately
                       <select
                         value={wizardPublishNow ? "yes" : "no"}
                         onChange={(event) => setWizardPublishNow(event.target.value === "yes")}
@@ -1491,17 +1257,6 @@ export function App() {
                         disabled={!wizardCreateVersion}
                       />
                     </label>
-                    <div className="wizard-summary">
-                      <small>
-                        <strong>Review:</strong> {newAgentName || "New Agent"} | {newAgentLanguage} | {newAgentLlmModel}
-                      </small>
-                      <small>
-                        STT/TTS: {newAgentSttProvider} / {newAgentTtsProvider}
-                      </small>
-                      <small>
-                        Version: {wizardCreateVersion ? (wizardPublishNow ? "create + publish" : "create draft") : "skip"}
-                      </small>
-                    </div>
                   </div>
                 ) : null}
 
@@ -1516,32 +1271,28 @@ export function App() {
                       (wizardStep === 1 && (!isUuid(tenantId) || newAgentName.trim().length < 2)) ||
                       (wizardStep === 2 && !newAgentLlmModel.trim())
                     }
-                    onClick={() => {
-                      if (wizardStep < 3) {
-                        setWizardStep((wizardStep + 1) as WizardStep);
-                      }
-                    }}
+                    onClick={() => setWizardStep((wizardStep + 1) as WizardStep)}
                     type="button"
                   >
                     Next
                   </button>
-                  <button disabled={busy || !token || !wizardCanSubmit} type="submit">
+                  <button disabled={busy || !wizardCanSubmit} type="submit">
                     Create Workflow
                   </button>
-                  <button disabled={busy || !token} onClick={() => void loadAgents()} type="button">
+                  <button disabled={busy} onClick={() => void loadAgents()} type="button">
                     Reload Agents
                   </button>
                 </div>
               </form>
             </section>
 
-            <section className="split-panel">
+            <section className="split two-col">
               <div className="panel">
-                <div className="panel-title-row">
+                <div className="panel-head">
                   <h3>Agents</h3>
                   <small>{agents.length} loaded</small>
                 </div>
-                <ul className="entity-list">
+                <ul className="list">
                   {agents.map((agent) => (
                     <li key={agent.id}>
                       <button
@@ -1565,58 +1316,34 @@ export function App() {
               </div>
 
               <div className="panel">
-                <div className="panel-title-row">
-                  <h3>Versioning</h3>
+                <div className="panel-head">
+                  <h3>Versions</h3>
                   <small>{selectedAgent ? selectedAgent.name : "Select an agent"}</small>
                 </div>
 
                 {selectedAgent ? (
-                  <>
-                    <form className="form-grid" onSubmit={createAgentVersion}>
-                      <label>
-                        System prompt
-                        <input
-                          value={newVersionPrompt}
-                          onChange={(event) => setNewVersionPrompt(event.target.value)}
-                          placeholder="Prompt para el agente"
-                        />
-                      </label>
-                      <label>
-                        Temperature
-                        <input
-                          value={newVersionTemperature}
-                          onChange={(event) => setNewVersionTemperature(event.target.value)}
-                          placeholder="0.3"
-                        />
-                      </label>
-                      <button disabled={busy || !token} type="submit">
-                        Create Version
-                      </button>
-                    </form>
-
-                    <div className="versions-grid">
-                      {agentVersions.map((version) => (
-                        <article key={version.id} className="version-card">
-                          <div className="panel-title-row">
-                            <strong>v{version.version}</strong>
-                            {version.published_at ? (
-                              <span className="badge on">published</span>
-                            ) : (
-                              <button disabled={busy || !token} onClick={() => void publishAgentVersion(version.id)} type="button">
-                                Publish
-                              </button>
-                            )}
-                          </div>
-                          <small>Created: {formatDateTime(version.created_at)}</small>
-                          <small>Temperature: {asNumber(version.temperature).toFixed(2)}</small>
-                          <small>Tools mapped: {version.tool_ids.length}</small>
-                          <pre>{version.system_prompt}</pre>
-                        </article>
-                      ))}
-                    </div>
-                  </>
+                  <div className="versions-grid">
+                    {agentVersions.map((version) => (
+                      <article key={version.id} className="version-card">
+                        <div className="row-inline">
+                          <strong>v{version.version}</strong>
+                          {version.published_at ? (
+                            <span className="badge on">published</span>
+                          ) : (
+                            <button disabled={busy} onClick={() => void publishVersion(version.id)} type="button">
+                              Publish
+                            </button>
+                          )}
+                        </div>
+                        <small>Created: {formatDateTime(version.created_at)}</small>
+                        <small>Temperature: {asNumber(version.temperature).toFixed(2)}</small>
+                        <small>Tools mapped: {version.tool_ids.length}</small>
+                        <pre>{version.system_prompt}</pre>
+                      </article>
+                    ))}
+                  </div>
                 ) : (
-                  <p className="muted">Select an agent to manage versions and publish behavior.</p>
+                  <p>Select an agent to view versions.</p>
                 )}
               </div>
             </section>
@@ -1626,10 +1353,11 @@ export function App() {
         {activeView === "operations" ? (
           <>
             <section className="panel">
-              <div className="panel-title-row">
-                <h3>Operational Filters</h3>
-                <small>KPIs, call list, and timeline share these filters.</small>
+              <div className="panel-head">
+                <h3>Filters</h3>
+                <small>Controls for KPI and call timeline.</small>
               </div>
+
               <div className="form-grid">
                 <label>
                   From
@@ -1655,90 +1383,55 @@ export function App() {
                     <option value="60">Every 60s</option>
                   </select>
                 </label>
-                <button disabled={busy || !token} onClick={() => void loadDashboard()} type="button">
-                  Refresh Dashboard
+                <button disabled={busy} onClick={() => void loadOperations()} type="button">
+                  Refresh Operations
                 </button>
               </div>
             </section>
 
             <section className="kpi-grid">
               <article className="kpi-card">
-                <h3>Total Calls</h3>
+                <small>Total Calls</small>
                 <strong>{totals.totalCalls}</strong>
-                <small>Aggregated from daily_kpis</small>
               </article>
               <article className="kpi-card">
-                <h3>Average Duration</h3>
+                <small>Avg Duration</small>
                 <strong>{formatSeconds(totals.avgDurationSec)}</strong>
-                <small>Weighted by call volume</small>
               </article>
               <article className="kpi-card">
-                <h3>Resolution Rate</h3>
+                <small>Resolution Rate</small>
                 <strong>{totals.resolutionRate.toFixed(2)}%</strong>
-                <small>Outcome = resolved</small>
               </article>
               <article className="kpi-card">
-                <h3>Handoff Rate</h3>
+                <small>Handoff Rate</small>
                 <strong>{totals.handoffRate.toFixed(2)}%</strong>
-                <small>Handoff or reason present</small>
               </article>
               <article className="kpi-card">
-                <h3>Total Cost</h3>
+                <small>Total Cost</small>
                 <strong>{usdFormatter.format(totals.totalCost)}</strong>
-                <small>Summed from KPI rows</small>
               </article>
               <article className="kpi-card">
-                <h3>Active Calls</h3>
+                <small>Active Calls</small>
                 <strong>{totals.activeCalls}</strong>
-                <small>Open calls in current list</small>
               </article>
             </section>
 
-            <section className="panel">
-              <div className="panel-title-row">
-                <h3>Connector Controls</h3>
-                <small>Use for runtime checks and simulated turns.</small>
-              </div>
-              <div className="form-grid">
-                <label>
-                  Connector URL
-                  <input value={connectorUrl} onChange={(event) => setConnectorUrl(event.target.value)} />
-                </label>
-                <label>
-                  Connector Token
-                  <input value={connectorToken} onChange={(event) => setConnectorToken(event.target.value)} />
-                </label>
-                <label>
-                  Simulated user turn
-                  <input value={userTurn} onChange={(event) => setUserTurn(event.target.value)} />
-                </label>
-                <button disabled={busy || !selectedCallId} onClick={() => void sendUserTurn()} type="button">
-                  Send User Turn
-                </button>
-                <button disabled={busy} onClick={() => void checkConnectorMode()} type="button">
-                  Check AI Mode
-                </button>
-              </div>
-              <p className="muted">Connector mode: {connectorMode}</p>
-            </section>
-
-            <section className="split-panel">
+            <section className="split two-col">
               <div className="panel">
-                <div className="panel-title-row">
+                <div className="panel-head">
                   <h3>Calls</h3>
                   <small>{calls.length} loaded</small>
                 </div>
-                <ul className="entity-list long">
+                <ul className="list long">
                   {calls.map((call) => {
-                    const isSelected = selectedCallId === call.id;
                     const isActive = !call.ended_at;
                     return (
                       <li key={call.id}>
                         <button
-                          className={isSelected ? "active" : ""}
+                          className={selectedCallId === call.id ? "active" : ""}
                           onClick={() => {
                             setSelectedCallId(call.id);
-                            void loadEvents(call.id);
+                            void loadCallEvents(call.id);
                           }}
                           type="button"
                         >
@@ -1749,7 +1442,6 @@ export function App() {
                           <small>Agent: {call.agent_id}</small>
                           <small>Started: {formatDateTime(call.started_at)}</small>
                           <small>Outcome: {call.outcome ?? "-"}</small>
-                          {call.handoff_reason ? <small>Handoff: {call.handoff_reason}</small> : null}
                         </button>
                       </li>
                     );
@@ -1758,11 +1450,11 @@ export function App() {
               </div>
 
               <div className="panel">
-                <div className="panel-title-row">
+                <div className="panel-head">
                   <h3>Timeline</h3>
                   {selectedCall ? (
-                    <button disabled={busy} onClick={() => void loadEvents(selectedCall.id)} type="button">
-                      Refresh Timeline
+                    <button disabled={busy} onClick={() => void loadCallEvents(selectedCall.id)} type="button">
+                      Refresh
                     </button>
                   ) : null}
                 </div>
@@ -1783,7 +1475,7 @@ export function App() {
 
                     <div className="timeline">
                       {events.length === 0 ? (
-                        <p className="muted">No events loaded yet.</p>
+                        <p>No events loaded yet.</p>
                       ) : (
                         events.map((event) => (
                           <article key={event.id}>
@@ -1801,17 +1493,16 @@ export function App() {
                     </div>
                   </>
                 ) : (
-                  <p className="muted">Select a call to inspect timeline events.</p>
+                  <p>Select a call to inspect timeline events.</p>
                 )}
               </div>
             </section>
 
             <section className="panel">
-              <div className="panel-title-row">
+              <div className="panel-head">
                 <h3>KPI Rows</h3>
                 <small>{kpis.length} loaded</small>
               </div>
-
               <div className="table-wrap">
                 <table>
                   <thead>
