@@ -1,6 +1,7 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type NumericLike = number | string | null;
+type ViewKey = "workspace" | "agents" | "operations";
 
 type CallRecord = {
   id: string;
@@ -67,9 +68,6 @@ type AgentVersionRecord = {
   tool_ids: string[];
 };
 
-const defaultTenant = "11111111-1111-1111-1111-111111111111";
-const storageKey = "ops-debug-web.config.v1";
-
 type PersistedConfig = {
   apiBaseUrl: string;
   bootstrapKey: string;
@@ -83,7 +81,36 @@ type PersistedConfig = {
   connectorToken: string;
   userTurn: string;
   autoRefreshSeconds: number;
+  firstAdminTenantName: string;
+  activeView: ViewKey;
 };
+
+const storageKey = "ops-debug-web.config.v3";
+const defaultTenant = "11111111-1111-1111-1111-111111111111";
+
+const defaultConfig: PersistedConfig = {
+  apiBaseUrl: "http://localhost:4000",
+  bootstrapKey: "",
+  tenantId: defaultTenant,
+  token: "",
+  loginEmail: "",
+  fromDate: toLocalDate(7),
+  toDate: toLocalDate(0),
+  agentFilter: "",
+  connectorUrl: "http://localhost:4200",
+  connectorToken: "",
+  userTurn: "Hola, dame un resumen breve de esta llamada",
+  autoRefreshSeconds: 0,
+  firstAdminTenantName: "My Company",
+  activeView: "workspace"
+};
+
+const usdFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
 
 function asNumber(value: NumericLike): number {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -106,11 +133,11 @@ function formatDateTime(input: string | null): string {
 }
 
 function formatDay(input: string): string {
-  const date = new Date(input);
-  if (Number.isNaN(date.getTime())) {
+  const parsed = new Date(input);
+  if (Number.isNaN(parsed.getTime())) {
     return input;
   }
-  return date.toLocaleDateString();
+  return parsed.toLocaleDateString();
 }
 
 function formatSeconds(totalSeconds: number): string {
@@ -141,7 +168,6 @@ function buildIsoFromDate(date: string, endOfDay: boolean): string | null {
 
   const full = `${date}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}`;
   const parsed = new Date(full);
-
   if (Number.isNaN(parsed.getTime())) {
     return null;
   }
@@ -153,7 +179,7 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
-function parseJwtClaims(token: string): { tenant_id?: string; role?: string } | null {
+function parseJwtClaims(token: string): { tenant_id?: string; role?: string; sub?: string } | null {
   const parts = token.split(".");
   if (parts.length < 2) {
     return null;
@@ -163,153 +189,70 @@ function parseJwtClaims(token: string): { tenant_id?: string; role?: string } | 
     const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
     const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
     const decoded = atob(padded);
-    const claims = JSON.parse(decoded) as { tenant_id?: string; role?: string };
-    return claims;
+    return JSON.parse(decoded) as { tenant_id?: string; role?: string; sub?: string };
   } catch {
     return null;
   }
 }
 
-const usdFormatter = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2
-});
+async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    const body = await response.text();
+    const details = body ? `: ${body}` : "";
+    throw new Error(`${response.status} ${response.statusText}${details}`);
+  }
+
+  return (await response.json()) as T;
+}
 
 export function App() {
-  const hasLoadedConfig = useRef(false);
-  const [apiBaseUrl, setApiBaseUrl] = useState("http://localhost:4000");
-  const [bootstrapKey, setBootstrapKey] = useState(
-    "a10159516f8d5a7e2b493824a02376691c2dda52b6afe9c6"
-  );
-  const [tenantId, setTenantId] = useState(defaultTenant);
-  const [token, setToken] = useState("");
+  const [activeView, setActiveView] = useState<ViewKey>(defaultConfig.activeView);
+  const [apiBaseUrl, setApiBaseUrl] = useState(defaultConfig.apiBaseUrl);
+  const [bootstrapKey, setBootstrapKey] = useState(defaultConfig.bootstrapKey);
+  const [tenantId, setTenantId] = useState(defaultConfig.tenantId);
+  const [token, setToken] = useState(defaultConfig.token);
   const [manualTokenInput, setManualTokenInput] = useState("");
-  const [loginEmail, setLoginEmail] = useState("");
+  const [loginEmail, setLoginEmail] = useState(defaultConfig.loginEmail);
   const [loginPassword, setLoginPassword] = useState("");
   const [firstAdminName, setFirstAdminName] = useState("");
-  const [firstAdminTenantName, setFirstAdminTenantName] = useState("My Company");
-  const [fromDate, setFromDate] = useState(toLocalDate(7));
-  const [toDate, setToDate] = useState(toLocalDate(0));
-  const [agentFilter, setAgentFilter] = useState("");
-  const [autoRefreshSeconds, setAutoRefreshSeconds] = useState(0);
+  const [firstAdminTenantName, setFirstAdminTenantName] = useState(defaultConfig.firstAdminTenantName);
+  const [fromDate, setFromDate] = useState(defaultConfig.fromDate);
+  const [toDate, setToDate] = useState(defaultConfig.toDate);
+  const [agentFilter, setAgentFilter] = useState(defaultConfig.agentFilter);
+  const [autoRefreshSeconds, setAutoRefreshSeconds] = useState(defaultConfig.autoRefreshSeconds);
+
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [kpis, setKpis] = useState<KpiRecord[]>([]);
-  const [selectedCallId, setSelectedCallId] = useState<string>("");
+  const [selectedCallId, setSelectedCallId] = useState("");
   const [events, setEvents] = useState<CallEvent[]>([]);
-  const [connectorUrl, setConnectorUrl] = useState("http://localhost:4200");
-  const [connectorToken, setConnectorToken] = useState(
-    "a44fccf1a89e46dbff6879ff84dfc13b8e4b553a0e1f0b1d"
-  );
-  const [connectorMode, setConnectorMode] = useState("unknown");
-  const [userTurn, setUserTurn] = useState("Hola, dame un resumen breve de esta llamada");
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("Ready");
+
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
+  const [newTenantName, setNewTenantName] = useState("");
+
   const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState("");
-  const [agentVersions, setAgentVersions] = useState<AgentVersionRecord[]>([]);
-  const [newTenantName, setNewTenantName] = useState("");
   const [newAgentName, setNewAgentName] = useState("");
   const [newAgentLanguage, setNewAgentLanguage] = useState("es");
   const [newAgentLlmModel, setNewAgentLlmModel] = useState("gpt-4o-mini");
   const [newAgentSttProvider, setNewAgentSttProvider] = useState("deepgram");
   const [newAgentTtsProvider, setNewAgentTtsProvider] = useState("rime");
+
+  const [agentVersions, setAgentVersions] = useState<AgentVersionRecord[]>([]);
   const [newVersionPrompt, setNewVersionPrompt] = useState(
     "Eres un agente de voz profesional. Responde de forma clara y breve en espanol."
   );
   const [newVersionTemperature, setNewVersionTemperature] = useState("0.3");
 
-  useEffect(() => {
-    const raw = localStorage.getItem(storageKey);
-    if (!raw) {
-      hasLoadedConfig.current = true;
-      return;
-    }
+  const [connectorUrl, setConnectorUrl] = useState(defaultConfig.connectorUrl);
+  const [connectorToken, setConnectorToken] = useState(defaultConfig.connectorToken);
+  const [connectorMode, setConnectorMode] = useState("unknown");
+  const [userTurn, setUserTurn] = useState(defaultConfig.userTurn);
 
-    try {
-      const parsed = JSON.parse(raw) as Partial<PersistedConfig>;
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("Ready");
 
-      if (typeof parsed.apiBaseUrl === "string") {
-        setApiBaseUrl(parsed.apiBaseUrl);
-      }
-      if (typeof parsed.bootstrapKey === "string") {
-        setBootstrapKey(parsed.bootstrapKey);
-      }
-      if (typeof parsed.tenantId === "string") {
-        setTenantId(parsed.tenantId);
-      }
-      if (typeof parsed.token === "string") {
-        setToken(parsed.token);
-        setManualTokenInput(parsed.token);
-      }
-      if (typeof parsed.loginEmail === "string") {
-        setLoginEmail(parsed.loginEmail);
-      }
-      if (typeof parsed.fromDate === "string") {
-        setFromDate(parsed.fromDate);
-      }
-      if (typeof parsed.toDate === "string") {
-        setToDate(parsed.toDate);
-      }
-      if (typeof parsed.agentFilter === "string") {
-        setAgentFilter(parsed.agentFilter);
-      }
-      if (typeof parsed.connectorUrl === "string") {
-        setConnectorUrl(parsed.connectorUrl);
-      }
-      if (typeof parsed.connectorToken === "string") {
-        setConnectorToken(parsed.connectorToken);
-      }
-      if (typeof parsed.userTurn === "string") {
-        setUserTurn(parsed.userTurn);
-      }
-      if (typeof parsed.autoRefreshSeconds === "number" && Number.isFinite(parsed.autoRefreshSeconds)) {
-        setAutoRefreshSeconds(parsed.autoRefreshSeconds);
-      }
-    } catch {
-      // ignore malformed localStorage
-    } finally {
-      hasLoadedConfig.current = true;
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!hasLoadedConfig.current) {
-      return;
-    }
-
-    const payload: PersistedConfig = {
-      apiBaseUrl,
-      bootstrapKey,
-      tenantId,
-      token,
-      loginEmail,
-      fromDate,
-      toDate,
-      agentFilter,
-      connectorUrl,
-      connectorToken,
-      userTurn,
-      autoRefreshSeconds
-    };
-
-    localStorage.setItem(storageKey, JSON.stringify(payload));
-  }, [
-    agentFilter,
-    apiBaseUrl,
-    autoRefreshSeconds,
-    bootstrapKey,
-    connectorToken,
-    connectorUrl,
-    fromDate,
-    loginEmail,
-    tenantId,
-    toDate,
-    token,
-    userTurn
-  ]);
+  const tokenClaims = useMemo(() => parseJwtClaims(token), [token]);
 
   const selectedCall = useMemo(
     () => calls.find((call) => call.id === selectedCallId) ?? null,
@@ -376,6 +319,117 @@ export function App() {
     return appHost !== "localhost" && appHost !== "127.0.0.1" && apiLooksLocal;
   }, [apiBaseUrl]);
 
+  useEffect(() => {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) {
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<PersistedConfig>;
+      if (typeof parsed.apiBaseUrl === "string") {
+        setApiBaseUrl(parsed.apiBaseUrl);
+      }
+      if (typeof parsed.bootstrapKey === "string") {
+        setBootstrapKey(parsed.bootstrapKey);
+      }
+      if (typeof parsed.tenantId === "string") {
+        setTenantId(parsed.tenantId);
+      }
+      if (typeof parsed.token === "string") {
+        setToken(parsed.token);
+        setManualTokenInput(parsed.token);
+      }
+      if (typeof parsed.loginEmail === "string") {
+        setLoginEmail(parsed.loginEmail);
+      }
+      if (typeof parsed.fromDate === "string") {
+        setFromDate(parsed.fromDate);
+      }
+      if (typeof parsed.toDate === "string") {
+        setToDate(parsed.toDate);
+      }
+      if (typeof parsed.agentFilter === "string") {
+        setAgentFilter(parsed.agentFilter);
+      }
+      if (typeof parsed.connectorUrl === "string") {
+        setConnectorUrl(parsed.connectorUrl);
+      }
+      if (typeof parsed.connectorToken === "string") {
+        setConnectorToken(parsed.connectorToken);
+      }
+      if (typeof parsed.userTurn === "string") {
+        setUserTurn(parsed.userTurn);
+      }
+      if (typeof parsed.autoRefreshSeconds === "number") {
+        setAutoRefreshSeconds(parsed.autoRefreshSeconds);
+      }
+      if (typeof parsed.firstAdminTenantName === "string") {
+        setFirstAdminTenantName(parsed.firstAdminTenantName);
+      }
+      if (parsed.activeView === "workspace" || parsed.activeView === "agents" || parsed.activeView === "operations") {
+        setActiveView(parsed.activeView);
+      }
+    } catch {
+      // ignore malformed localStorage
+    }
+  }, []);
+
+  useEffect(() => {
+    const payload: PersistedConfig = {
+      apiBaseUrl,
+      bootstrapKey,
+      tenantId,
+      token,
+      loginEmail,
+      fromDate,
+      toDate,
+      agentFilter,
+      connectorUrl,
+      connectorToken,
+      userTurn,
+      autoRefreshSeconds,
+      firstAdminTenantName,
+      activeView
+    };
+
+    localStorage.setItem(storageKey, JSON.stringify(payload));
+  }, [
+    activeView,
+    agentFilter,
+    apiBaseUrl,
+    autoRefreshSeconds,
+    bootstrapKey,
+    connectorToken,
+    connectorUrl,
+    firstAdminTenantName,
+    fromDate,
+    loginEmail,
+    tenantId,
+    toDate,
+    token,
+    userTurn
+  ]);
+
+  function buildClientQuery(): URLSearchParams {
+    const params = new URLSearchParams();
+    const fromIso = buildIsoFromDate(fromDate, false);
+    const toIso = buildIsoFromDate(toDate, true);
+
+    if (fromIso) {
+      params.set("from", fromIso);
+    }
+    if (toIso) {
+      params.set("to", toIso);
+    }
+    const trimmedAgentFilter = agentFilter.trim();
+    if (trimmedAgentFilter && isUuid(trimmedAgentFilter)) {
+      params.set("agent_id", trimmedAgentFilter);
+    }
+
+    return params;
+  }
+
   function applyManualToken() {
     const trimmed = manualTokenInput.trim();
     if (!trimmed) {
@@ -400,103 +454,44 @@ export function App() {
     setStatus("JWT cleared");
   }
 
-  async function loginWithPassword(event: FormEvent) {
-    event.preventDefault();
-
-    const email = loginEmail.trim();
-    if (!email || !loginPassword) {
-      setStatus("Enter email and password");
-      return;
-    }
-
-    setBusy(true);
-    setStatus("Signing in...");
-
-    try {
-      const response = await fetch(`${apiBaseUrl}/auth/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          email,
-          password: loginPassword,
-          tenant_id: isUuid(tenantId) ? tenantId : undefined
-        })
-      });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Login failed (${response.status}): ${body}`);
-      }
-
-      const payload = (await response.json()) as {
-        token: string;
-        active_membership?: { tenant_id: string; role: string };
-      };
-
-      setToken(payload.token);
-      setManualTokenInput(payload.token);
-      if (payload.active_membership?.tenant_id) {
-        setTenantId(payload.active_membership.tenant_id);
-      }
-      setLoginPassword("");
-      setStatus("Signed in successfully");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not sign in");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function registerFirstAdmin(event: FormEvent) {
     event.preventDefault();
 
     const email = loginEmail.trim();
-    const name = firstAdminName.trim();
     const password = loginPassword;
+    const name = firstAdminName.trim();
     const tenantName = firstAdminTenantName.trim();
 
-    if (!email || !name || !password || !tenantName) {
-      setStatus("Complete name, email, password, and tenant name");
+    if (!email || !password || !name || !tenantName) {
+      setStatus("Complete name, email, password and tenant name");
       return;
     }
 
     setBusy(true);
     setStatus("Registering first admin...");
-
     try {
-      const response = await fetch(`${apiBaseUrl}/auth/register-first-admin`, {
+      const payload = await requestJson<{
+        token: string;
+        membership: { tenant_id: string };
+      }>(`${apiBaseUrl}/auth/register-first-admin`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email,
-          name,
           password,
+          name,
           tenant_name: tenantName,
           timezone: "UTC",
           plan: "starter"
         })
       });
 
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`First admin setup failed (${response.status}): ${body}`);
-      }
-
-      const payload = (await response.json()) as {
-        token: string;
-        membership?: { tenant_id: string };
-      };
-
       setToken(payload.token);
       setManualTokenInput(payload.token);
-      if (payload.membership?.tenant_id) {
-        setTenantId(payload.membership.tenant_id);
-      }
+      setTenantId(payload.membership.tenant_id);
+      setLoginPassword("");
       setStatus("First admin ready. You are signed in.");
+      setActiveView("workspace");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not register first admin");
     } finally {
@@ -504,31 +499,93 @@ export function App() {
     }
   }
 
+  async function loginWithPassword(event: FormEvent) {
+    event.preventDefault();
+
+    const email = loginEmail.trim();
+    const password = loginPassword;
+    if (!email || !password) {
+      setStatus("Enter email and password");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Signing in...");
+    try {
+      const payload = await requestJson<{
+        token: string;
+        active_membership: { tenant_id: string; role: string };
+      }>(`${apiBaseUrl}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          password,
+          tenant_id: isUuid(tenantId) ? tenantId : undefined
+        })
+      });
+
+      setToken(payload.token);
+      setManualTokenInput(payload.token);
+      if (payload.active_membership?.tenant_id) {
+        setTenantId(payload.active_membership.tenant_id);
+      }
+      setLoginPassword("");
+      setStatus(`Signed in as ${email}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not sign in");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function bootstrapDevToken(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setStatus("Issuing dev token...");
+    try {
+      const payload = await requestJson<{ token: string }>(`${apiBaseUrl}/internal/dev/token`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-dev-bootstrap-key": bootstrapKey
+        },
+        body: JSON.stringify({
+          user_id: "ops-debug-user",
+          tenant_id: tenantId,
+          role: "internal_admin",
+          is_internal: true,
+          expires_in: "2h"
+        })
+      });
+
+      setToken(payload.token);
+      setManualTokenInput(payload.token);
+      setStatus("Dev token ready");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not issue dev token");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function loadTenants() {
     if (!token) {
-      setStatus("Issue or paste JWT first");
+      setStatus("Sign in first");
       return;
     }
 
     setBusy(true);
     setStatus("Loading tenants...");
     try {
-      const response = await fetch(`${apiBaseUrl}/internal/tenants`, {
+      const payload = await requestJson<{ items: TenantRecord[] }>(`${apiBaseUrl}/internal/tenants`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-
-      if (!response.ok) {
-        throw new Error(`Tenants request failed (${response.status})`);
+      setTenants(payload.items);
+      if (payload.items.length > 0 && !payload.items.some((tenant) => tenant.id === tenantId)) {
+        setTenantId(payload.items[0].id);
       }
-
-      const body = (await response.json()) as { items: TenantRecord[] };
-      setTenants(body.items);
-
-      if (!tenantId && body.items[0]) {
-        setTenantId(body.items[0].id);
-      }
-
-      setStatus(`Loaded ${body.items.length} tenants`);
+      setStatus(`Loaded ${payload.items.length} tenants`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not load tenants");
     } finally {
@@ -539,7 +596,7 @@ export function App() {
   async function createTenant(event: FormEvent) {
     event.preventDefault();
     if (!token) {
-      setStatus("Issue or paste JWT first");
+      setStatus("Sign in first");
       return;
     }
 
@@ -552,7 +609,7 @@ export function App() {
     setBusy(true);
     setStatus("Creating tenant...");
     try {
-      const response = await fetch(`${apiBaseUrl}/internal/tenants`, {
+      const tenant = await requestJson<TenantRecord>(`${apiBaseUrl}/internal/tenants`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -561,12 +618,6 @@ export function App() {
         body: JSON.stringify({ name, timezone: "UTC", plan: "starter" })
       });
 
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Create tenant failed (${response.status}): ${body}`);
-      }
-
-      const tenant = (await response.json()) as TenantRecord;
       setNewTenantName("");
       setTenantId(tenant.id);
       await loadTenants();
@@ -580,12 +631,11 @@ export function App() {
 
   async function loadAgents(targetTenantId = tenantId) {
     if (!token) {
-      setStatus("Issue or paste JWT first");
+      setStatus("Sign in first");
       return;
     }
-
-    if (!targetTenantId) {
-      setStatus("Select a tenant first");
+    if (!isUuid(targetTenantId)) {
+      setStatus("Select a valid tenant first");
       return;
     }
 
@@ -593,25 +643,18 @@ export function App() {
     setStatus("Loading agents...");
     try {
       const params = new URLSearchParams({ tenant_id: targetTenantId, limit: "200" });
-      const response = await fetch(`${apiBaseUrl}/internal/agents?${params.toString()}`, {
+      const payload = await requestJson<{ items: AgentRecord[] }>(`${apiBaseUrl}/internal/agents?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      if (!response.ok) {
-        throw new Error(`Agents request failed (${response.status})`);
-      }
-
-      const body = (await response.json()) as { items: AgentRecord[] };
-      setAgents(body.items);
-
-      const keepSelected = body.items.some((agent) => agent.id === selectedAgentId);
-      const nextAgentId = keepSelected ? selectedAgentId : body.items[0]?.id ?? "";
+      setAgents(payload.items);
+      const keepSelected = payload.items.some((agent) => agent.id === selectedAgentId);
+      const nextAgentId = keepSelected ? selectedAgentId : payload.items[0]?.id ?? "";
       setSelectedAgentId(nextAgentId);
       if (!nextAgentId) {
         setAgentVersions([]);
       }
-
-      setStatus(`Loaded ${body.items.length} agents`);
+      setStatus(`Loaded ${payload.items.length} agents`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not load agents");
     } finally {
@@ -622,11 +665,11 @@ export function App() {
   async function createAgent(event: FormEvent) {
     event.preventDefault();
     if (!token) {
-      setStatus("Issue or paste JWT first");
+      setStatus("Sign in first");
       return;
     }
-    if (!tenantId) {
-      setStatus("Select a tenant first");
+    if (!isUuid(tenantId)) {
+      setStatus("Select a valid tenant first");
       return;
     }
 
@@ -639,7 +682,7 @@ export function App() {
     setBusy(true);
     setStatus("Creating agent...");
     try {
-      const response = await fetch(`${apiBaseUrl}/internal/agents`, {
+      const agent = await requestJson<AgentRecord>(`${apiBaseUrl}/internal/agents`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -655,12 +698,6 @@ export function App() {
         })
       });
 
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Create agent failed (${response.status}): ${body}`);
-      }
-
-      const agent = (await response.json()) as AgentRecord;
       setNewAgentName("");
       await loadAgents(tenantId);
       setSelectedAgentId(agent.id);
@@ -680,17 +717,14 @@ export function App() {
     setBusy(true);
     setStatus("Loading agent versions...");
     try {
-      const response = await fetch(`${apiBaseUrl}/internal/agents/${agentId}/versions`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (!response.ok) {
-        throw new Error(`Agent versions request failed (${response.status})`);
-      }
-
-      const body = (await response.json()) as { items: AgentVersionRecord[] };
-      setAgentVersions(body.items);
-      setStatus(`Loaded ${body.items.length} versions`);
+      const payload = await requestJson<{ items: AgentVersionRecord[] }>(
+        `${apiBaseUrl}/internal/agents/${agentId}/versions`,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      );
+      setAgentVersions(payload.items);
+      setStatus(`Loaded ${payload.items.length} versions`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not load agent versions");
     } finally {
@@ -700,12 +734,8 @@ export function App() {
 
   async function createAgentVersion(event: FormEvent) {
     event.preventDefault();
-    if (!token) {
-      setStatus("Issue or paste JWT first");
-      return;
-    }
-    if (!selectedAgentId) {
-      setStatus("Select an agent first");
+    if (!token || !selectedAgentId) {
+      setStatus("Select an agent and sign in first");
       return;
     }
 
@@ -724,7 +754,7 @@ export function App() {
     setBusy(true);
     setStatus("Creating agent version...");
     try {
-      const response = await fetch(`${apiBaseUrl}/internal/agents/${selectedAgentId}/versions`, {
+      await requestJson(`${apiBaseUrl}/internal/agents/${selectedAgentId}/versions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -733,47 +763,28 @@ export function App() {
         body: JSON.stringify({ system_prompt: prompt, temperature })
       });
 
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Create version failed (${response.status}): ${body}`);
-      }
-
       await loadAgentVersions(selectedAgentId);
       setStatus("Agent version created");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not create agent version");
+      setStatus(error instanceof Error ? error.message : "Could not create version");
     } finally {
       setBusy(false);
     }
   }
 
   async function publishAgentVersion(versionId: string) {
-    if (!token) {
-      setStatus("Issue or paste JWT first");
-      return;
-    }
-    if (!selectedAgentId) {
-      setStatus("Select an agent first");
+    if (!token || !selectedAgentId) {
+      setStatus("Select an agent and sign in first");
       return;
     }
 
     setBusy(true);
     setStatus("Publishing version...");
     try {
-      const response = await fetch(
-        `${apiBaseUrl}/internal/agents/${selectedAgentId}/versions/${versionId}/publish`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`
-          }
-        }
-      );
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Publish version failed (${response.status}): ${body}`);
-      }
+      await requestJson(`${apiBaseUrl}/internal/agents/${selectedAgentId}/versions/${versionId}/publish`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` }
+      });
 
       await loadAgentVersions(selectedAgentId);
       setStatus("Version published");
@@ -784,105 +795,35 @@ export function App() {
     }
   }
 
-  async function bootstrapToken(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setStatus("Issuing token...");
-
-    try {
-      const response = await fetch(`${apiBaseUrl}/internal/dev/token`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-dev-bootstrap-key": bootstrapKey
-        },
-        body: JSON.stringify({
-          user_id: "ops-debug-user",
-          tenant_id: tenantId,
-          role: "internal_admin",
-          is_internal: true,
-          expires_in: "2h"
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Token request failed (${response.status})`);
-      }
-
-      const body = (await response.json()) as { token: string };
-      setToken(body.token);
-      setManualTokenInput(body.token);
-      setStatus("Token ready");
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("(404)")) {
-        setStatus("/internal/dev/token returned 404. In production use a manual JWT.");
-      } else {
-        setStatus(error instanceof Error ? error.message : "Token bootstrap failed");
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function buildClientQuery(): URLSearchParams {
-    const params = new URLSearchParams();
-    const fromIso = buildIsoFromDate(fromDate, false);
-    const toIso = buildIsoFromDate(toDate, true);
-
-    if (fromIso) {
-      params.set("from", fromIso);
-    }
-    if (toIso) {
-      params.set("to", toIso);
-    }
-    const trimmedAgentFilter = agentFilter.trim();
-    if (trimmedAgentFilter && isUuid(trimmedAgentFilter)) {
-      params.set("agent_id", trimmedAgentFilter);
-    }
-
-    return params;
-  }
-
   async function loadDashboard() {
     if (!token) {
-      setStatus("Issue token first");
+      setStatus("Sign in first");
       return;
     }
 
     setBusy(true);
     setStatus("Loading KPI and calls...");
-
     try {
       const query = buildClientQuery().toString();
       const callsUrl = `${apiBaseUrl}/client/calls${query ? `?${query}` : ""}`;
       const kpisUrl = `${apiBaseUrl}/client/kpis${query ? `?${query}` : ""}`;
 
-      const [callsRes, kpisRes] = await Promise.all([
-        fetch(callsUrl, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(kpisUrl, { headers: { Authorization: `Bearer ${token}` } })
+      const [callsPayload, kpisPayload] = await Promise.all([
+        requestJson<{ items: CallRecord[] }>(callsUrl, { headers: { Authorization: `Bearer ${token}` } }),
+        requestJson<{ items: KpiRecord[] }>(kpisUrl, { headers: { Authorization: `Bearer ${token}` } })
       ]);
 
-      if (!callsRes.ok) {
-        throw new Error(`Calls request failed (${callsRes.status})`);
-      }
-      if (!kpisRes.ok) {
-        throw new Error(`KPI request failed (${kpisRes.status})`);
-      }
+      setCalls(callsPayload.items);
+      setKpis(kpisPayload.items);
 
-      const callsBody = (await callsRes.json()) as { items: CallRecord[] };
-      const kpiBody = (await kpisRes.json()) as { items: KpiRecord[] };
-
-      setCalls(callsBody.items);
-      setKpis(kpiBody.items);
-
-      const keepSelection = callsBody.items.some((call) => call.id === selectedCallId);
-      const nextCallId = keepSelection ? selectedCallId : callsBody.items[0]?.id ?? "";
+      const keepSelection = callsPayload.items.some((call) => call.id === selectedCallId);
+      const nextCallId = keepSelection ? selectedCallId : callsPayload.items[0]?.id ?? "";
       setSelectedCallId(nextCallId);
       if (!nextCallId) {
         setEvents([]);
       }
 
-      setStatus(`Loaded ${callsBody.items.length} calls and ${kpiBody.items.length} KPI rows`);
+      setStatus(`Loaded ${callsPayload.items.length} calls and ${kpisPayload.items.length} KPI rows`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not load dashboard");
     } finally {
@@ -898,19 +839,30 @@ export function App() {
     setBusy(true);
     setStatus("Loading call timeline...");
     try {
-      const response = await fetch(`${apiBaseUrl}/internal/calls/${callId}/events`, {
+      const payload = await requestJson<{ items: CallEvent[] }>(`${apiBaseUrl}/internal/calls/${callId}/events`, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      if (!response.ok) {
-        throw new Error(`Timeline request failed (${response.status})`);
-      }
-
-      const body = (await response.json()) as { items: CallEvent[] };
-      setEvents(body.items);
-      setStatus(`Loaded ${body.items.length} events`);
+      setEvents(payload.items);
+      setStatus(`Loaded ${payload.items.length} events`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not load events");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function checkConnectorMode() {
+    setBusy(true);
+    setStatus("Checking connector mode...");
+    try {
+      const payload = await requestJson<{ mode: string }>(`${connectorUrl}/runtime/ai-mode`, {
+        headers: { Authorization: `Bearer ${connectorToken}` }
+      });
+      setConnectorMode(payload.mode);
+      setStatus(`Connector mode: ${payload.mode}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not read connector mode");
     } finally {
       setBusy(false);
     }
@@ -921,28 +873,24 @@ export function App() {
       setStatus("Select a call first");
       return;
     }
-    if (!userTurn.trim()) {
+
+    const text = userTurn.trim();
+    if (!text) {
       setStatus("Write a user message first");
       return;
     }
 
     setBusy(true);
     setStatus("Sending user turn to connector...");
-
     try {
-      const response = await fetch(`${connectorUrl}/runtime/sessions/${selectedCallId}/user-turn`, {
+      await requestJson(`${connectorUrl}/runtime/sessions/${selectedCallId}/user-turn`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${connectorToken}`
         },
-        body: JSON.stringify({ text: userTurn })
+        body: JSON.stringify({ text })
       });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Connector request failed (${response.status}): ${body}`);
-      }
 
       await loadEvents(selectedCallId);
       setStatus("User turn processed");
@@ -953,28 +901,8 @@ export function App() {
     }
   }
 
-  async function checkConnectorMode() {
-    setBusy(true);
-    setStatus("Checking connector AI mode...");
-    try {
-      const response = await fetch(`${connectorUrl}/runtime/ai-mode`, {
-        headers: { Authorization: `Bearer ${connectorToken}` }
-      });
-      if (!response.ok) {
-        throw new Error(`Connector mode failed (${response.status})`);
-      }
-      const body = (await response.json()) as { mode: string };
-      setConnectorMode(body.mode);
-      setStatus(`Connector mode: ${body.mode}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not read connector mode");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   useEffect(() => {
-    if (!token || autoRefreshSeconds <= 0) {
+    if (!token || autoRefreshSeconds <= 0 || activeView !== "operations") {
       return;
     }
 
@@ -988,517 +916,573 @@ export function App() {
     return () => {
       window.clearInterval(interval);
     };
-  }, [
-    agentFilter,
-    apiBaseUrl,
-    autoRefreshSeconds,
-    fromDate,
-    selectedCallId,
-    toDate,
-    token
-  ]);
+  }, [activeView, autoRefreshSeconds, selectedCallId, token, apiBaseUrl, fromDate, toDate, agentFilter]);
 
   return (
-    <div className="layout">
-      <header className="hero">
-        <h1>Voice Ops Command Center</h1>
-        <p>Track KPI health, inspect calls, and debug runtime timelines from one screen.</p>
-      </header>
-
-      <section className="card">
-        <div className="panel-title-row">
-          <h2>Portal Sign-In</h2>
-          <small>Production-friendly auth (no manual JWT required)</small>
+    <div className="shell">
+      <aside className="sidebar">
+        <div>
+          <p className="eyebrow">Voice Agent SaaS</p>
+          <h1>Operator Portal</h1>
+          <p className="muted">Administra clientes, agentes y operacion desde un flujo separado por modulo.</p>
         </div>
 
-        <form className="row" onSubmit={loginWithPassword}>
-          <label>
-            Email
-            <input value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} placeholder="you@company.com" />
-          </label>
-          <label>
-            Password
-            <input
-              type="password"
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              placeholder="your password"
-            />
-          </label>
-          <button disabled={busy} type="submit">
-            Sign In
+        <nav className="nav-grid">
+          <button className={activeView === "workspace" ? "active" : ""} onClick={() => setActiveView("workspace")} type="button">
+            Workspace
           </button>
-        </form>
+          <button className={activeView === "agents" ? "active" : ""} onClick={() => setActiveView("agents")} type="button">
+            Agent Builder
+          </button>
+          <button className={activeView === "operations" ? "active" : ""} onClick={() => setActiveView("operations")} type="button">
+            Operations
+          </button>
+        </nav>
 
-        <form className="row first-admin-row" onSubmit={registerFirstAdmin}>
-          <label>
-            First admin name (one-time setup)
-            <input value={firstAdminName} onChange={(e) => setFirstAdminName(e.target.value)} placeholder="Owner" />
-          </label>
-          <label>
-            First tenant name
-            <input
-              value={firstAdminTenantName}
-              onChange={(e) => setFirstAdminTenantName(e.target.value)}
-              placeholder="My Company"
-            />
-          </label>
-          <button disabled={busy} type="submit">
-            Register First Admin
-          </button>
-        </form>
-      </section>
-
-      <section className="card">
-        <form onSubmit={bootstrapToken} className="row">
-          <label>
-            API Base URL
-            <input value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} />
-          </label>
-          <label>
-            Dev Bootstrap Key
-            <input value={bootstrapKey} onChange={(e) => setBootstrapKey(e.target.value)} />
-          </label>
-          <label>
-            Tenant ID
-            <input value={tenantId} onChange={(e) => setTenantId(e.target.value)} />
-          </label>
-          <button disabled={busy} type="submit">
-            Issue JWT
-          </button>
-        </form>
-
-        {usingLocalhostApi ? (
-          <p className="warning">
-            You are on Railway but API Base URL points to localhost. Use your public control-plane URL.
-          </p>
-        ) : null}
-
-        <div className="row token-row">
-          <label>
-            Manual JWT (for production environments)
-            <input
-              value={manualTokenInput}
-              onChange={(e) => setManualTokenInput(e.target.value)}
-              placeholder="paste bearer token"
-            />
-          </label>
-          <button disabled={busy} onClick={applyManualToken} type="button">
-            Use Manual JWT
-          </button>
-          <button disabled={busy || !token} onClick={clearToken} type="button">
-            Clear JWT
-          </button>
+        <div className="sidebar-meta">
+          <small>
+            <strong>Tenant:</strong> {tenantId || "-"}
+          </small>
+          <small>
+            <strong>User:</strong> {tokenClaims?.sub ?? "not signed"}
+          </small>
+          <small>
+            <strong>Role:</strong> {tokenClaims?.role ?? "-"}
+          </small>
         </div>
+      </aside>
 
-        <div className="status-row">
+      <main className="content">
+        <header className="content-header">
+          <div>
+            <h2>
+              {activeView === "workspace"
+                ? "Workspace Setup"
+                : activeView === "agents"
+                  ? "Agent Builder"
+                  : "Operations Console"}
+            </h2>
+            <p>
+              {activeView === "workspace"
+                ? "Sign-in, tenant onboarding and security setup."
+                : activeView === "agents"
+                  ? "Create agents, version prompts, and publish production behavior."
+                  : "Monitor KPI health, call timelines, and runtime connector behavior."}
+            </p>
+          </div>
+          <span className={`status-pill ${busy ? "busy" : ""}`}>{busy ? "Working" : "Idle"}</span>
+        </header>
+
+        <section className="status-panel">
           <span>
             Auth: <strong>{token ? "Ready" : "Missing token"}</strong>
           </span>
           <span>
-            JWT: <code>{token ? `${token.slice(0, 28)}...` : "not issued"}</code>
+            JWT: <code>{token ? `${token.slice(0, 30)}...` : "not issued"}</code>
           </span>
           <span>Status: {status}</span>
-        </div>
-      </section>
+        </section>
 
-      <section className="card">
-        <div className="row">
-          <label>
-            Tenant workspace
-            <select
-              value={tenantId}
-              onChange={(e) => {
-                setTenantId(e.target.value);
-                setAgentFilter("");
-                setSelectedAgentId("");
-                setAgents([]);
-                setAgentVersions([]);
-              }}
-            >
-              {tenantOptions.map((tenant) => (
-                <option key={tenant.id} value={tenant.id}>
-                  {tenant.name} ({tenant.id.slice(0, 8)}...)
-                </option>
-              ))}
-            </select>
-          </label>
-          <button disabled={busy || !token} onClick={() => void loadTenants()} type="button">
-            Load Tenants
-          </button>
-          <button disabled={busy || !token} onClick={() => void loadAgents()} type="button">
-            Load Agents
-          </button>
-          <button
-            disabled={busy || !token || !selectedAgentId}
-            onClick={() => void loadAgentVersions(selectedAgentId)}
-            type="button"
-          >
-            Load Versions
-          </button>
-        </div>
+        {activeView === "workspace" ? (
+          <>
+            <section className="panel">
+              <div className="panel-title-row">
+                <h3>Portal Sign-In</h3>
+                <small>No necesitas pegar JWT manual para uso normal.</small>
+              </div>
 
-        <div className="admin-grid">
-          <form className="admin-box" onSubmit={createTenant}>
-            <h2>Create Tenant</h2>
-            <label>
-              Tenant name
-              <input
-                value={newTenantName}
-                onChange={(e) => setNewTenantName(e.target.value)}
-                placeholder="Acme Dental"
-              />
-            </label>
-            <button disabled={busy || !token} type="submit">
-              Create Tenant
-            </button>
-          </form>
+              <form className="form-grid" onSubmit={loginWithPassword}>
+                <label>
+                  API Base URL
+                  <input value={apiBaseUrl} onChange={(event) => setApiBaseUrl(event.target.value)} />
+                </label>
+                <label>
+                  Email
+                  <input value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} placeholder="you@company.com" />
+                </label>
+                <label>
+                  Password
+                  <input
+                    type="password"
+                    value={loginPassword}
+                    onChange={(event) => setLoginPassword(event.target.value)}
+                    placeholder="your password"
+                  />
+                </label>
+                <button disabled={busy} type="submit">
+                  Sign In
+                </button>
+              </form>
 
-          <form className="admin-box" onSubmit={createAgent}>
-            <h2>Create Agent</h2>
-            <div className="row">
-              <label>
-                Name
-                <input
-                  value={newAgentName}
-                  onChange={(e) => setNewAgentName(e.target.value)}
-                  placeholder="Recepcion Clinica"
-                />
-              </label>
-              <label>
-                Language
-                <input value={newAgentLanguage} onChange={(e) => setNewAgentLanguage(e.target.value)} />
-              </label>
-              <label>
-                LLM model
-                <input value={newAgentLlmModel} onChange={(e) => setNewAgentLlmModel(e.target.value)} />
-              </label>
-              <label>
-                STT provider
-                <input value={newAgentSttProvider} onChange={(e) => setNewAgentSttProvider(e.target.value)} />
-              </label>
-              <label>
-                TTS provider
-                <input value={newAgentTtsProvider} onChange={(e) => setNewAgentTtsProvider(e.target.value)} />
-              </label>
-            </div>
-            <button disabled={busy || !token || !tenantId} type="submit">
-              Create Agent
-            </button>
-          </form>
-        </div>
+              <form className="form-grid soft" onSubmit={registerFirstAdmin}>
+                <label>
+                  First admin name
+                  <input
+                    value={firstAdminName}
+                    onChange={(event) => setFirstAdminName(event.target.value)}
+                    placeholder="Owner"
+                  />
+                </label>
+                <label>
+                  First tenant name
+                  <input
+                    value={firstAdminTenantName}
+                    onChange={(event) => setFirstAdminTenantName(event.target.value)}
+                    placeholder="My Company"
+                  />
+                </label>
+                <button disabled={busy} type="submit">
+                  Register First Admin
+                </button>
+              </form>
+            </section>
 
-        <div className="split admin-split">
-          <div>
-            <div className="panel-title-row">
-              <h2>Tenant Agents</h2>
-              <small>{agents.length} loaded</small>
-            </div>
-            <ul className="calls-list">
-              {agents.map((agent) => (
-                <li key={agent.id}>
-                  <button
-                    className={selectedAgentId === agent.id ? "active" : ""}
-                    onClick={() => {
-                      setSelectedAgentId(agent.id);
-                      setAgentFilter(agent.id);
-                      void loadAgentVersions(agent.id);
-                    }}
-                    type="button"
-                  >
-                    <div className="call-main">
-                      <strong>{agent.name}</strong>
-                      <span className="badge ended">{agent.status}</span>
-                    </div>
-                    <small>Agent ID: {agent.id}</small>
-                    <small>LLM: {agent.llm_model}</small>
-                    <small>
-                      STT/TTS: {agent.stt_provider} / {agent.tts_provider}
-                    </small>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
+            <section className="panel">
+              <div className="panel-title-row">
+                <h3>Tenant Workspace</h3>
+                <small>Crea clientes y selecciona el tenant activo.</small>
+              </div>
 
-          <div className="admin-box">
-            <div className="panel-title-row">
-              <h2>Agent Versions</h2>
-              <small>{selectedAgent ? selectedAgent.name : "Select an agent"}</small>
-            </div>
+              <div className="form-grid">
+                <label>
+                  Tenant
+                  <select value={tenantId} onChange={(event) => setTenantId(event.target.value)}>
+                    {tenantOptions.map((tenant) => (
+                      <option key={tenant.id} value={tenant.id}>
+                        {tenant.name} ({tenant.id.slice(0, 8)}...)
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button disabled={busy || !token} onClick={() => void loadTenants()} type="button">
+                  Load Tenants
+                </button>
+              </div>
 
-            {selectedAgent ? (
-              <>
-                <form className="row" onSubmit={createAgentVersion}>
+              <form className="form-grid soft" onSubmit={createTenant}>
+                <label>
+                  New tenant name
+                  <input
+                    value={newTenantName}
+                    onChange={(event) => setNewTenantName(event.target.value)}
+                    placeholder="Acme Dental"
+                  />
+                </label>
+                <button disabled={busy || !token} type="submit">
+                  Create Tenant
+                </button>
+              </form>
+            </section>
+
+            <section className="panel">
+              <details>
+                <summary>Advanced token tools (dev and emergency fallback)</summary>
+                <form className="form-grid" onSubmit={bootstrapDevToken}>
                   <label>
-                    System prompt
-                    <input
-                      value={newVersionPrompt}
-                      onChange={(e) => setNewVersionPrompt(e.target.value)}
-                      placeholder="Prompt para el agente"
-                    />
+                    Dev bootstrap key
+                    <input value={bootstrapKey} onChange={(event) => setBootstrapKey(event.target.value)} />
                   </label>
-                  <label>
-                    Temperature
-                    <input
-                      value={newVersionTemperature}
-                      onChange={(e) => setNewVersionTemperature(e.target.value)}
-                      placeholder="0.3"
-                    />
-                  </label>
-                  <button disabled={busy || !token} type="submit">
-                    Create Version
+                  <button disabled={busy} type="submit">
+                    Issue Dev JWT
                   </button>
                 </form>
 
-                <div className="versions-list">
-                  {agentVersions.map((version) => (
-                    <article key={version.id} className="version-card">
-                      <div className="panel-title-row">
-                        <strong>v{version.version}</strong>
-                        {version.published_at ? (
-                          <span className="badge active">published</span>
-                        ) : (
-                          <button
-                            disabled={busy || !token}
-                            onClick={() => void publishAgentVersion(version.id)}
-                            type="button"
-                          >
-                            Publish
-                          </button>
-                        )}
-                      </div>
-                      <small>Created: {formatDateTime(version.created_at)}</small>
-                      <small>Temperature: {asNumber(version.temperature).toFixed(2)}</small>
-                      <small>Tools mapped: {version.tool_ids.length}</small>
-                      <pre>{version.system_prompt}</pre>
-                    </article>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <p>Select an agent to create and publish versions.</p>
-            )}
-          </div>
-        </div>
-      </section>
-
-      <section className="card">
-        <div className="row">
-          <label>
-            From
-            <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
-          </label>
-          <label>
-            To
-            <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
-          </label>
-          <label>
-            Agent ID (optional)
-            <input
-              value={agentFilter}
-              onChange={(e) => setAgentFilter(e.target.value)}
-              placeholder="uuid"
-            />
-          </label>
-          <label>
-            Auto refresh
-            <select
-              value={String(autoRefreshSeconds)}
-              onChange={(e) => setAutoRefreshSeconds(Number(e.target.value))}
-            >
-              <option value="0">Off</option>
-              <option value="10">Every 10s</option>
-              <option value="30">Every 30s</option>
-              <option value="60">Every 60s</option>
-            </select>
-          </label>
-          <button disabled={busy || !token} onClick={() => void loadDashboard()} type="button">
-            Refresh Dashboard
-          </button>
-        </div>
-      </section>
-
-      <section className="kpi-grid">
-        <article className="kpi-card">
-          <h2>Total Calls</h2>
-          <strong>{totals.totalCalls}</strong>
-          <small>Aggregated from daily_kpis rows</small>
-        </article>
-        <article className="kpi-card">
-          <h2>Average Duration</h2>
-          <strong>{formatSeconds(totals.avgDurationSec)}</strong>
-          <small>Weighted by call volume</small>
-        </article>
-        <article className="kpi-card">
-          <h2>Resolution Rate</h2>
-          <strong>{totals.resolutionRate.toFixed(2)}%</strong>
-          <small>Outcome = resolved</small>
-        </article>
-        <article className="kpi-card">
-          <h2>Handoff Rate</h2>
-          <strong>{totals.handoffRate.toFixed(2)}%</strong>
-          <small>Outcome = handoff or reason present</small>
-        </article>
-        <article className="kpi-card">
-          <h2>Total Cost</h2>
-          <strong>{usdFormatter.format(totals.totalCost)}</strong>
-          <small>Summed from daily_kpis.total_cost_usd</small>
-        </article>
-        <article className="kpi-card">
-          <h2>Active Calls</h2>
-          <strong>{totals.activeCalls}</strong>
-          <small>Open calls in current list</small>
-        </article>
-      </section>
-
-      <section className="card">
-        <div className="row connector-row">
-          <label>
-            Connector URL
-            <input value={connectorUrl} onChange={(e) => setConnectorUrl(e.target.value)} />
-          </label>
-          <label>
-            Connector Token
-            <input value={connectorToken} onChange={(e) => setConnectorToken(e.target.value)} />
-          </label>
-          <label>
-            Simulated User Turn
-            <input value={userTurn} onChange={(e) => setUserTurn(e.target.value)} />
-          </label>
-          <button disabled={busy || !selectedCallId} onClick={() => void sendUserTurn()} type="button">
-            Send User Turn
-          </button>
-          <button disabled={busy} onClick={() => void checkConnectorMode()} type="button">
-            Check AI Mode
-          </button>
-        </div>
-        <div className="status-row compact">
-          <span>
-            Connector mode: <code>{connectorMode}</code>
-          </span>
-        </div>
-      </section>
-
-      <section className="card split">
-        <div className="calls-panel">
-          <div className="panel-title-row">
-            <h2>Calls</h2>
-            <small>{calls.length} loaded</small>
-          </div>
-          <ul className="calls-list">
-            {calls.map((call) => {
-              const isSelected = selectedCallId === call.id;
-              const isActive = !call.ended_at;
-              return (
-                <li key={call.id}>
-                  <button
-                    className={isSelected ? "active" : ""}
-                    onClick={() => {
-                      setSelectedCallId(call.id);
-                      void loadEvents(call.id);
-                    }}
-                    type="button"
-                  >
-                    <div className="call-main">
-                      <strong>{call.twilio_call_sid}</strong>
-                      <span className={isActive ? "badge active" : "badge ended"}>
-                        {isActive ? "active" : "ended"}
-                      </span>
-                    </div>
-                    <small>Agent: {call.agent_id}</small>
-                    <small>Started: {formatDateTime(call.started_at)}</small>
-                    <small>Outcome: {call.outcome ?? "-"}</small>
-                    {call.handoff_reason ? <small>Handoff: {call.handoff_reason}</small> : null}
+                <div className="form-grid">
+                  <label>
+                    Manual JWT
+                    <input
+                      value={manualTokenInput}
+                      onChange={(event) => setManualTokenInput(event.target.value)}
+                      placeholder="paste bearer token"
+                    />
+                  </label>
+                  <button disabled={busy} onClick={applyManualToken} type="button">
+                    Use Manual JWT
                   </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+                  <button disabled={busy || !token} onClick={clearToken} type="button">
+                    Clear JWT
+                  </button>
+                </div>
+              </details>
 
-        <div className="timeline-panel">
-          <div className="panel-title-row">
-            <h2>Timeline</h2>
-            {selectedCall ? (
-              <button disabled={busy} onClick={() => void loadEvents(selectedCall.id)} type="button">
-                Refresh Timeline
-              </button>
-            ) : null}
-          </div>
+              {usingLocalhostApi ? (
+                <p className="warning">Estas en Railway pero el API apunta a localhost. Cambia a tu dominio publico.</p>
+              ) : null}
+            </section>
+          </>
+        ) : null}
 
-          {selectedCall ? (
-            <>
-              <div className="call-meta">
-                <span>
-                  <strong>Call ID:</strong> <code>{selectedCall.id}</code>
-                </span>
-                <span>
-                  <strong>Started:</strong> {formatDateTime(selectedCall.started_at)}
-                </span>
-                <span>
-                  <strong>Ended:</strong> {formatDateTime(selectedCall.ended_at)}
-                </span>
+        {activeView === "agents" ? (
+          <>
+            <section className="panel">
+              <div className="panel-title-row">
+                <h3>Agent Catalog</h3>
+                <small>Define configuracion base por tenant.</small>
               </div>
 
-              <div className="timeline">
-                {events.length === 0 ? (
-                  <p>No events loaded yet. Select a call or refresh timeline.</p>
+              <div className="form-grid">
+                <label>
+                  Active tenant
+                  <select
+                    value={tenantId}
+                    onChange={(event) => {
+                      setTenantId(event.target.value);
+                      setSelectedAgentId("");
+                      setAgentVersions([]);
+                    }}
+                  >
+                    {tenantOptions.map((tenant) => (
+                      <option key={tenant.id} value={tenant.id}>
+                        {tenant.name} ({tenant.id.slice(0, 8)}...)
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button disabled={busy || !token} onClick={() => void loadAgents()} type="button">
+                  Load Agents
+                </button>
+              </div>
+
+              <form className="form-grid soft" onSubmit={createAgent}>
+                <label>
+                  Agent name
+                  <input
+                    value={newAgentName}
+                    onChange={(event) => setNewAgentName(event.target.value)}
+                    placeholder="Reception Bot"
+                  />
+                </label>
+                <label>
+                  Language
+                  <input value={newAgentLanguage} onChange={(event) => setNewAgentLanguage(event.target.value)} />
+                </label>
+                <label>
+                  LLM
+                  <input value={newAgentLlmModel} onChange={(event) => setNewAgentLlmModel(event.target.value)} />
+                </label>
+                <label>
+                  STT
+                  <input value={newAgentSttProvider} onChange={(event) => setNewAgentSttProvider(event.target.value)} />
+                </label>
+                <label>
+                  TTS
+                  <input value={newAgentTtsProvider} onChange={(event) => setNewAgentTtsProvider(event.target.value)} />
+                </label>
+                <button disabled={busy || !token || !isUuid(tenantId)} type="submit">
+                  Create Agent
+                </button>
+              </form>
+            </section>
+
+            <section className="split-panel">
+              <div className="panel">
+                <div className="panel-title-row">
+                  <h3>Agents</h3>
+                  <small>{agents.length} loaded</small>
+                </div>
+                <ul className="entity-list">
+                  {agents.map((agent) => (
+                    <li key={agent.id}>
+                      <button
+                        className={selectedAgentId === agent.id ? "active" : ""}
+                        onClick={() => {
+                          setSelectedAgentId(agent.id);
+                          setAgentFilter(agent.id);
+                          void loadAgentVersions(agent.id);
+                        }}
+                        type="button"
+                      >
+                        <strong>{agent.name}</strong>
+                        <small>{agent.id}</small>
+                        <small>
+                          {agent.stt_provider} / {agent.tts_provider}
+                        </small>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="panel">
+                <div className="panel-title-row">
+                  <h3>Versioning</h3>
+                  <small>{selectedAgent ? selectedAgent.name : "Select an agent"}</small>
+                </div>
+
+                {selectedAgent ? (
+                  <>
+                    <form className="form-grid" onSubmit={createAgentVersion}>
+                      <label>
+                        System prompt
+                        <input
+                          value={newVersionPrompt}
+                          onChange={(event) => setNewVersionPrompt(event.target.value)}
+                          placeholder="Prompt para el agente"
+                        />
+                      </label>
+                      <label>
+                        Temperature
+                        <input
+                          value={newVersionTemperature}
+                          onChange={(event) => setNewVersionTemperature(event.target.value)}
+                          placeholder="0.3"
+                        />
+                      </label>
+                      <button disabled={busy || !token} type="submit">
+                        Create Version
+                      </button>
+                    </form>
+
+                    <div className="versions-grid">
+                      {agentVersions.map((version) => (
+                        <article key={version.id} className="version-card">
+                          <div className="panel-title-row">
+                            <strong>v{version.version}</strong>
+                            {version.published_at ? (
+                              <span className="badge on">published</span>
+                            ) : (
+                              <button disabled={busy || !token} onClick={() => void publishAgentVersion(version.id)} type="button">
+                                Publish
+                              </button>
+                            )}
+                          </div>
+                          <small>Created: {formatDateTime(version.created_at)}</small>
+                          <small>Temperature: {asNumber(version.temperature).toFixed(2)}</small>
+                          <small>Tools mapped: {version.tool_ids.length}</small>
+                          <pre>{version.system_prompt}</pre>
+                        </article>
+                      ))}
+                    </div>
+                  </>
                 ) : (
-                  events.map((evt) => (
-                    <article key={evt.id}>
-                      <h3>{evt.type}</h3>
-                      <small>
-                        {formatDateTime(evt.ts)} | attempts={evt.processing_attempts} | processed=
-                        {evt.processed_at ? "yes" : "no"}
-                      </small>
-                      {evt.last_error ? <small className="error">last_error={evt.last_error}</small> : null}
-                      <pre>{JSON.stringify(evt.payload_json, null, 2)}</pre>
-                    </article>
-                  ))
+                  <p className="muted">Select an agent to manage versions and publish behavior.</p>
                 )}
               </div>
-            </>
-          ) : (
-            <p>Select a call to inspect timeline events.</p>
-          )}
-        </div>
-      </section>
+            </section>
+          </>
+        ) : null}
 
-      <section className="card">
-        <div className="panel-title-row">
-          <h2>KPI Rows</h2>
-          <small>{kpis.length} loaded</small>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Day</th>
-                <th>Agent</th>
-                <th>Calls</th>
-                <th>Avg Duration</th>
-                <th>Resolution %</th>
-                <th>Handoff %</th>
-                <th>Cost USD</th>
-              </tr>
-            </thead>
-            <tbody>
-              {kpis.map((row) => (
-                <tr key={`${row.day}-${row.agent_id ?? "all"}`}>
-                  <td>{formatDay(row.day)}</td>
-                  <td>{row.agent_id ?? "all_agents"}</td>
-                  <td>{row.calls}</td>
-                  <td>{formatSeconds(asNumber(row.avg_duration_sec))}</td>
-                  <td>{asNumber(row.resolution_rate).toFixed(2)}%</td>
-                  <td>{asNumber(row.handoff_rate).toFixed(2)}%</td>
-                  <td>{usdFormatter.format(asNumber(row.total_cost_usd))}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+        {activeView === "operations" ? (
+          <>
+            <section className="panel">
+              <div className="panel-title-row">
+                <h3>Operational Filters</h3>
+                <small>KPIs, call list, and timeline share these filters.</small>
+              </div>
+              <div className="form-grid">
+                <label>
+                  From
+                  <input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} />
+                </label>
+                <label>
+                  To
+                  <input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} />
+                </label>
+                <label>
+                  Agent ID (optional)
+                  <input value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)} placeholder="uuid" />
+                </label>
+                <label>
+                  Auto refresh
+                  <select
+                    value={String(autoRefreshSeconds)}
+                    onChange={(event) => setAutoRefreshSeconds(Number(event.target.value))}
+                  >
+                    <option value="0">Off</option>
+                    <option value="10">Every 10s</option>
+                    <option value="30">Every 30s</option>
+                    <option value="60">Every 60s</option>
+                  </select>
+                </label>
+                <button disabled={busy || !token} onClick={() => void loadDashboard()} type="button">
+                  Refresh Dashboard
+                </button>
+              </div>
+            </section>
+
+            <section className="kpi-grid">
+              <article className="kpi-card">
+                <h3>Total Calls</h3>
+                <strong>{totals.totalCalls}</strong>
+                <small>Aggregated from daily_kpis</small>
+              </article>
+              <article className="kpi-card">
+                <h3>Average Duration</h3>
+                <strong>{formatSeconds(totals.avgDurationSec)}</strong>
+                <small>Weighted by call volume</small>
+              </article>
+              <article className="kpi-card">
+                <h3>Resolution Rate</h3>
+                <strong>{totals.resolutionRate.toFixed(2)}%</strong>
+                <small>Outcome = resolved</small>
+              </article>
+              <article className="kpi-card">
+                <h3>Handoff Rate</h3>
+                <strong>{totals.handoffRate.toFixed(2)}%</strong>
+                <small>Handoff or reason present</small>
+              </article>
+              <article className="kpi-card">
+                <h3>Total Cost</h3>
+                <strong>{usdFormatter.format(totals.totalCost)}</strong>
+                <small>Summed from KPI rows</small>
+              </article>
+              <article className="kpi-card">
+                <h3>Active Calls</h3>
+                <strong>{totals.activeCalls}</strong>
+                <small>Open calls in current list</small>
+              </article>
+            </section>
+
+            <section className="panel">
+              <div className="panel-title-row">
+                <h3>Connector Controls</h3>
+                <small>Use for runtime checks and simulated turns.</small>
+              </div>
+              <div className="form-grid">
+                <label>
+                  Connector URL
+                  <input value={connectorUrl} onChange={(event) => setConnectorUrl(event.target.value)} />
+                </label>
+                <label>
+                  Connector Token
+                  <input value={connectorToken} onChange={(event) => setConnectorToken(event.target.value)} />
+                </label>
+                <label>
+                  Simulated user turn
+                  <input value={userTurn} onChange={(event) => setUserTurn(event.target.value)} />
+                </label>
+                <button disabled={busy || !selectedCallId} onClick={() => void sendUserTurn()} type="button">
+                  Send User Turn
+                </button>
+                <button disabled={busy} onClick={() => void checkConnectorMode()} type="button">
+                  Check AI Mode
+                </button>
+              </div>
+              <p className="muted">Connector mode: {connectorMode}</p>
+            </section>
+
+            <section className="split-panel">
+              <div className="panel">
+                <div className="panel-title-row">
+                  <h3>Calls</h3>
+                  <small>{calls.length} loaded</small>
+                </div>
+                <ul className="entity-list long">
+                  {calls.map((call) => {
+                    const isSelected = selectedCallId === call.id;
+                    const isActive = !call.ended_at;
+                    return (
+                      <li key={call.id}>
+                        <button
+                          className={isSelected ? "active" : ""}
+                          onClick={() => {
+                            setSelectedCallId(call.id);
+                            void loadEvents(call.id);
+                          }}
+                          type="button"
+                        >
+                          <div className="row-inline">
+                            <strong>{call.twilio_call_sid}</strong>
+                            <span className={`badge ${isActive ? "on" : "off"}`}>{isActive ? "active" : "ended"}</span>
+                          </div>
+                          <small>Agent: {call.agent_id}</small>
+                          <small>Started: {formatDateTime(call.started_at)}</small>
+                          <small>Outcome: {call.outcome ?? "-"}</small>
+                          {call.handoff_reason ? <small>Handoff: {call.handoff_reason}</small> : null}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+
+              <div className="panel">
+                <div className="panel-title-row">
+                  <h3>Timeline</h3>
+                  {selectedCall ? (
+                    <button disabled={busy} onClick={() => void loadEvents(selectedCall.id)} type="button">
+                      Refresh Timeline
+                    </button>
+                  ) : null}
+                </div>
+
+                {selectedCall ? (
+                  <>
+                    <div className="call-meta">
+                      <span>
+                        <strong>Call ID:</strong> <code>{selectedCall.id}</code>
+                      </span>
+                      <span>
+                        <strong>Started:</strong> {formatDateTime(selectedCall.started_at)}
+                      </span>
+                      <span>
+                        <strong>Ended:</strong> {formatDateTime(selectedCall.ended_at)}
+                      </span>
+                    </div>
+
+                    <div className="timeline">
+                      {events.length === 0 ? (
+                        <p className="muted">No events loaded yet.</p>
+                      ) : (
+                        events.map((event) => (
+                          <article key={event.id}>
+                            <h4>{event.type}</h4>
+                            <small>
+                              {formatDateTime(event.ts)} | attempts={event.processing_attempts} | processed={
+                                event.processed_at ? "yes" : "no"
+                              }
+                            </small>
+                            {event.last_error ? <small className="danger">last_error={event.last_error}</small> : null}
+                            <pre>{JSON.stringify(event.payload_json, null, 2)}</pre>
+                          </article>
+                        ))
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <p className="muted">Select a call to inspect timeline events.</p>
+                )}
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-title-row">
+                <h3>KPI Rows</h3>
+                <small>{kpis.length} loaded</small>
+              </div>
+
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Day</th>
+                      <th>Agent</th>
+                      <th>Calls</th>
+                      <th>Avg Duration</th>
+                      <th>Resolution %</th>
+                      <th>Handoff %</th>
+                      <th>Cost USD</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {kpis.map((row) => (
+                      <tr key={`${row.day}-${row.agent_id ?? "all"}`}>
+                        <td>{formatDay(row.day)}</td>
+                        <td>{row.agent_id ?? "all_agents"}</td>
+                        <td>{row.calls}</td>
+                        <td>{formatSeconds(asNumber(row.avg_duration_sec))}</td>
+                        <td>{asNumber(row.resolution_rate).toFixed(2)}%</td>
+                        <td>{asNumber(row.handoff_rate).toFixed(2)}%</td>
+                        <td>{usdFormatter.format(asNumber(row.total_cost_usd))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </>
+        ) : null}
+      </main>
     </div>
   );
 }

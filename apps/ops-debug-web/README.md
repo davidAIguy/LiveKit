@@ -1,6 +1,6 @@
 # Ops Debug Web
 
-Minimal local UI for operational debugging.
+SaaS operator portal for tenant onboarding, agent setup, and runtime operations.
 
 ## Features
 
