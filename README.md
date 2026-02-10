@@ -49,6 +49,7 @@ This repository contains the initial foundation for a multi-tenant AI voice plat
 6. Run Twilio media bridge smoke test: `./scripts/twilio-media-bridge-smoke-test.sh`
    - Require outbound TTS media: `REQUIRE_TTS_OUTBOUND=true ./scripts/twilio-media-bridge-smoke-test.sh`
    - Probe vendor TTS contract: `./scripts/tts-vendor-probe.sh rime` (or `remi`)
+   - Validate ingestion + analytics end-to-end: `./scripts/validate-runtime-analytics.sh`
 7. Use debug UI at `http://localhost:4300` and send simulated user turns via connector.
 
 ## Demo automation tools
