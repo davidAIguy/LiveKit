@@ -306,6 +306,10 @@ button:disabled {
   align-items: end;
 }
 
+.form-grid .wide {
+  grid-column: 1 / -1;
+}
+
 .form-grid.soft {
   margin-top: 10px;
   padding-top: 10px;

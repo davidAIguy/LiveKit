@@ -16,7 +16,7 @@ Initial backend service for the Voice Agent Ops Platform.
 ## Setup
 
 1. Copy `.env.example` to `.env`.
-2. Ensure Postgres is running and run migrations from `db/migrations/0001_init.sql`, `db/migrations/0002_call_events_processing.sql`, `db/migrations/0003_runtime_dispatches.sql`, `db/migrations/0004_call_events_dispatch_queue.sql`, and `db/migrations/0005_runtime_launch_jobs.sql`.
+2. Ensure Postgres is running and run migrations from `db/migrations/0001_init.sql`, `db/migrations/0002_call_events_processing.sql`, `db/migrations/0003_runtime_dispatches.sql`, `db/migrations/0004_call_events_dispatch_queue.sql`, `db/migrations/0005_runtime_launch_jobs.sql`, and `db/migrations/0006_agent_greeting_text.sql`.
 3. Install dependencies: `npm install`.
 4. Start development server: `npm run dev`.
 
@@ -86,6 +86,12 @@ node -e "const jwt=require('jsonwebtoken'); console.log(jwt.sign({sub:'user-1',t
 - `PATCH /internal/phone-numbers/:phoneNumberId/agent`
   - Body fields: `agent_id` (`uuid` or `null`)
 - Behavior: maps inbound Twilio number (`To`) to tenant/agent used by webhook handoff.
+
+## Agent settings endpoint
+
+- `PATCH /internal/agents/:agentId`
+- Body fields (all optional): `name`, `language`, `llm_model`, `stt_provider`, `tts_provider`, `voice_id`, `greeting_text`
+- Behavior: updates live agent settings. `greeting_text` controls the first spoken greeting when a call starts.
 
 ## Automation Gateway endpoints
 

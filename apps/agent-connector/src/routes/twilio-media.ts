@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { appendCallEvent, findCallByTwilioSid } from "../db.js";
+import { appendCallEvent, findCallByTwilioSid, findCallContext } from "../db.js";
 import { env } from "../config.js";
 import { voiceSessionManager } from "../services/voice/session-manager.js";
 import { twilioMediaBridge } from "../services/voice/twilio-media-bridge.js";
@@ -132,13 +132,18 @@ export async function registerTwilioMediaRoutes(app: FastifyInstance): Promise<v
             if (env.VOICE_AUTO_GREETING_ENABLED && !greetedCalls.has(callId)) {
               greetedCalls.add(callId);
               try {
-                const speak = await voiceSessionManager.speak(callId, env.VOICE_AUTO_GREETING_TEXT);
+                const callContext = await findCallContext(callId);
+                const greetingText = callContext?.greeting_text?.trim() || env.VOICE_AUTO_GREETING_TEXT;
+                const greetingSource = callContext?.greeting_text?.trim() ? "agent_config" : "connector_default";
+
+                const speak = await voiceSessionManager.speak(callId, greetingText);
                 if (speak.attempted) {
                   await appendCallEvent(callId, "runtime.voice_tts_synthesized", {
                     trace_id: traceId,
                     bytes: speak.bytes,
                     transport_mode: speak.transport_mode,
-                    source: "auto_greeting"
+                    source: "auto_greeting",
+                    greeting_source: greetingSource
                   });
 
                   if (speak.packet) {
@@ -147,14 +152,17 @@ export async function registerTwilioMediaRoutes(app: FastifyInstance): Promise<v
                       await appendCallEvent(callId, "runtime.twilio_media_stream_sent_tts", {
                         trace_id: traceId,
                         bytes: speak.bytes,
-                        source: "auto_greeting"
+                        source: "auto_greeting",
+                        greeting_source: greetingSource
                       });
                     }
                   }
 
                   await appendCallEvent(callId, "runtime.voice_auto_greeting_sent", {
                     trace_id: traceId,
-                    stream_sid: streamSid
+                    stream_sid: streamSid,
+                    greeting_source: greetingSource,
+                    greeting_text: greetingText
                   });
                 }
               } catch (error) {

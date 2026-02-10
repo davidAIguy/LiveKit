@@ -26,8 +26,23 @@ const CreateAgentSchema = z.object({
   llm_model: z.string().default("gpt-4o-mini"),
   stt_provider: z.string().default("deepgram"),
   tts_provider: z.string().default("rime"),
-  voice_id: z.string().optional()
+  voice_id: z.string().optional(),
+  greeting_text: z.string().min(5).max(500).optional()
 });
+
+const UpdateAgentSchema = z
+  .object({
+    name: z.string().min(2).optional(),
+    language: z.string().min(2).optional(),
+    llm_model: z.string().min(2).optional(),
+    stt_provider: z.string().min(2).optional(),
+    tts_provider: z.string().min(2).optional(),
+    voice_id: z.string().nullable().optional(),
+    greeting_text: z.string().min(5).max(500).nullable().optional()
+  })
+  .refine((body) => Object.keys(body).length > 0, {
+    message: "At least one field is required"
+  });
 
 const CreateVersionSchema = z.object({
   system_prompt: z.string().min(10),
@@ -306,7 +321,7 @@ export async function registerInternalRoutes(app: FastifyInstance): Promise<void
       }
 
       const result = await db.query(
-        `select id, tenant_id, name, status, language, llm_model, stt_provider, tts_provider, voice_id, created_at
+        `select id, tenant_id, name, status, language, llm_model, stt_provider, tts_provider, voice_id, greeting_text, created_at
          from agents
          where ($1::uuid is null or tenant_id = $1::uuid)
          order by created_at desc
@@ -330,9 +345,9 @@ export async function registerInternalRoutes(app: FastifyInstance): Promise<void
       }
 
       const result = await db.query(
-        `insert into agents (tenant_id, name, language, llm_model, stt_provider, tts_provider, voice_id)
-         values ($1, $2, $3, $4, $5, $6, $7)
-         returning id, tenant_id, name, status, language, llm_model, stt_provider, tts_provider, voice_id, created_at`,
+        `insert into agents (tenant_id, name, language, llm_model, stt_provider, tts_provider, voice_id, greeting_text)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
+         returning id, tenant_id, name, status, language, llm_model, stt_provider, tts_provider, voice_id, greeting_text, created_at`,
         [
           body.tenant_id,
           body.name,
@@ -340,11 +355,83 @@ export async function registerInternalRoutes(app: FastifyInstance): Promise<void
           body.llm_model,
           body.stt_provider,
           body.tts_provider,
-          body.voice_id ?? null
+          body.voice_id ?? null,
+          body.greeting_text ?? null
         ]
       );
 
       reply.code(201).send(result.rows[0]);
+    }
+  );
+
+  app.patch(
+    "/internal/agents/:agentId",
+    { preHandler: [requireRole(["internal_admin", "internal_operator"], true)] },
+    async (request, reply) => {
+      const auth = request.auth!;
+      const params = z.object({ agentId: z.string().uuid() }).parse(request.params);
+      const body = UpdateAgentSchema.parse(request.body);
+
+      const agentRes = await db.query(`select id, tenant_id from agents where id = $1`, [params.agentId]);
+      if (agentRes.rows.length === 0) {
+        reply.code(404).send({ error: "not_found", message: "Agent not found" });
+        return;
+      }
+
+      const agent = agentRes.rows[0] as { tenant_id: string };
+      if (auth.role !== "internal_admin" && agent.tenant_id !== auth.tenantId) {
+        reply.code(403).send({ error: "forbidden", message: "Cross-tenant write blocked" });
+        return;
+      }
+
+      const updates: string[] = [];
+      const values: unknown[] = [params.agentId];
+      let next = 2;
+
+      if (body.name !== undefined) {
+        updates.push(`name = $${next}`);
+        values.push(body.name);
+        next += 1;
+      }
+      if (body.language !== undefined) {
+        updates.push(`language = $${next}`);
+        values.push(body.language);
+        next += 1;
+      }
+      if (body.llm_model !== undefined) {
+        updates.push(`llm_model = $${next}`);
+        values.push(body.llm_model);
+        next += 1;
+      }
+      if (body.stt_provider !== undefined) {
+        updates.push(`stt_provider = $${next}`);
+        values.push(body.stt_provider);
+        next += 1;
+      }
+      if (body.tts_provider !== undefined) {
+        updates.push(`tts_provider = $${next}`);
+        values.push(body.tts_provider);
+        next += 1;
+      }
+      if (body.voice_id !== undefined) {
+        updates.push(`voice_id = $${next}`);
+        values.push(body.voice_id);
+        next += 1;
+      }
+      if (body.greeting_text !== undefined) {
+        updates.push(`greeting_text = $${next}`);
+        values.push(body.greeting_text);
+      }
+
+      const result = await db.query(
+        `update agents
+         set ${updates.join(", ")}
+         where id = $1
+         returning id, tenant_id, name, status, language, llm_model, stt_provider, tts_provider, voice_id, greeting_text, created_at`,
+        values
+      );
+
+      reply.send(result.rows[0]);
     }
   );
 

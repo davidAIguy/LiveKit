@@ -28,6 +28,7 @@ export async function findCallContext(callId: string): Promise<{
   stt_provider: string;
   tts_provider: string;
   system_prompt: string | null;
+  greeting_text: string | null;
 } | null> {
   const result = await db.query(
     `select
@@ -37,6 +38,7 @@ export async function findCallContext(callId: string): Promise<{
        a.llm_model,
        a.stt_provider,
        a.tts_provider,
+       a.greeting_text,
        av.system_prompt
      from calls c
      join agents a on a.id = c.agent_id
@@ -59,6 +61,7 @@ export async function findCallContext(callId: string): Promise<{
     stt_provider: string;
     tts_provider: string;
     system_prompt: string | null;
+    greeting_text: string | null;
   };
 }
 

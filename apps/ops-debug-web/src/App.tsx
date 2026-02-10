@@ -24,6 +24,7 @@ type AgentRecord = {
   stt_provider: string;
   tts_provider: string;
   voice_id: string | null;
+  greeting_text: string | null;
   created_at: string;
 };
 
@@ -241,6 +242,8 @@ export function App() {
   const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [agentVersions, setAgentVersions] = useState<AgentVersionRecord[]>([]);
+  const [editAgentGreeting, setEditAgentGreeting] = useState("");
+  const [editAgentVoiceId, setEditAgentVoiceId] = useState("");
 
   const [phoneNumbers, setPhoneNumbers] = useState<PhoneNumberRecord[]>([]);
   const [newPhoneE164, setNewPhoneE164] = useState("");
@@ -255,6 +258,7 @@ export function App() {
   const [newAgentSttProvider, setNewAgentSttProvider] = useState("deepgram");
   const [newAgentTtsProvider, setNewAgentTtsProvider] = useState("rime");
   const [newAgentVoiceId, setNewAgentVoiceId] = useState("");
+  const [newAgentGreeting, setNewAgentGreeting] = useState("");
   const [wizardCreateVersion, setWizardCreateVersion] = useState(true);
   const [wizardPublishNow, setWizardPublishNow] = useState(true);
   const [newVersionPrompt, setNewVersionPrompt] = useState(
@@ -315,6 +319,17 @@ export function App() {
     () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
     [agents, selectedAgentId]
   );
+
+  useEffect(() => {
+    if (!selectedAgent) {
+      setEditAgentGreeting("");
+      setEditAgentVoiceId("");
+      return;
+    }
+
+    setEditAgentGreeting(selectedAgent.greeting_text ?? "");
+    setEditAgentVoiceId(selectedAgent.voice_id ?? "");
+  }, [selectedAgent]);
 
   const selectedCall = useMemo(
     () => calls.find((call) => call.id === selectedCallId) ?? null,
@@ -768,7 +783,8 @@ export function App() {
           llm_model: newAgentLlmModel,
           stt_provider: newAgentSttProvider,
           tts_provider: newAgentTtsProvider,
-          voice_id: newAgentVoiceId.trim() || undefined
+          voice_id: newAgentVoiceId.trim() || undefined,
+          greeting_text: newAgentGreeting.trim() || undefined
         })
       });
 
@@ -803,6 +819,7 @@ export function App() {
       setWizardStep(1);
       setNewAgentName("");
       setNewAgentVoiceId("");
+      setNewAgentGreeting("");
 
       setStatus(
         wizardCreateVersion
@@ -837,6 +854,45 @@ export function App() {
       setStatus("Version published");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not publish version");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateSelectedAgentSettings(event: FormEvent): Promise<void> {
+    event.preventDefault();
+
+    if (!token || !selectedAgentId) {
+      setStatus("Select an agent first");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Saving agent settings...");
+
+    try {
+      const payload: {
+        greeting_text: string | null;
+        voice_id: string | null;
+      } = {
+        greeting_text: editAgentGreeting.trim() || null,
+        voice_id: editAgentVoiceId.trim() || null
+      };
+
+      await requestJson<AgentRecord>(`${apiBaseUrl}/internal/agents/${selectedAgentId}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const updatedAgents = await fetchAgentsByTenant(tenantId);
+      setAgents(updatedAgents);
+      setStatus("Agent settings saved");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not save agent settings");
     } finally {
       setBusy(false);
     }
@@ -1360,6 +1416,14 @@ export function App() {
                         placeholder="voice_123"
                       />
                     </label>
+                    <label className="wide">
+                      Initial greeting (optional)
+                      <input
+                        value={newAgentGreeting}
+                        onChange={(event) => setNewAgentGreeting(event.target.value)}
+                        placeholder="Hola, gracias por llamar a Pizzeria. ¿En que te ayudo hoy?"
+                      />
+                    </label>
                   </div>
                 ) : null}
 
@@ -1469,26 +1533,55 @@ export function App() {
                 </div>
 
                 {selectedAgent ? (
-                  <div className="versions-grid">
-                    {agentVersions.map((version) => (
-                      <article key={version.id} className="version-card">
-                        <div className="row-inline">
-                          <strong>v{version.version}</strong>
-                          {version.published_at ? (
-                            <span className="badge on">published</span>
-                          ) : (
-                            <button disabled={busy} onClick={() => void publishVersion(version.id)} type="button">
-                              Publish
-                            </button>
-                          )}
-                        </div>
-                        <small>Created: {formatDateTime(version.created_at)}</small>
-                        <small>Temperature: {asNumber(version.temperature).toFixed(2)}</small>
-                        <small>Tools mapped: {version.tool_ids.length}</small>
-                        <pre>{version.system_prompt}</pre>
-                      </article>
-                    ))}
-                  </div>
+                  <>
+                    <p>
+                      El <strong>saludo inicial</strong> se reproduce al contestar. El <strong>system prompt</strong> vive en las versiones y
+                      controla las respuestas despues de que el cliente habla.
+                    </p>
+
+                    <form className="form-grid soft" onSubmit={updateSelectedAgentSettings}>
+                      <label className="wide">
+                        Initial greeting
+                        <input
+                          value={editAgentGreeting}
+                          onChange={(event) => setEditAgentGreeting(event.target.value)}
+                          placeholder="Hola, gracias por llamar a Pizzeria. ¿En que te ayudo hoy?"
+                        />
+                      </label>
+                      <label>
+                        Voice ID (optional)
+                        <input
+                          value={editAgentVoiceId}
+                          onChange={(event) => setEditAgentVoiceId(event.target.value)}
+                          placeholder="voice_123"
+                        />
+                      </label>
+                      <button disabled={busy} type="submit">
+                        Save Agent Settings
+                      </button>
+                    </form>
+
+                    <div className="versions-grid">
+                      {agentVersions.map((version) => (
+                        <article key={version.id} className="version-card">
+                          <div className="row-inline">
+                            <strong>v{version.version}</strong>
+                            {version.published_at ? (
+                              <span className="badge on">published</span>
+                            ) : (
+                              <button disabled={busy} onClick={() => void publishVersion(version.id)} type="button">
+                                Publish
+                              </button>
+                            )}
+                          </div>
+                          <small>Created: {formatDateTime(version.created_at)}</small>
+                          <small>Temperature: {asNumber(version.temperature).toFixed(2)}</small>
+                          <small>Tools mapped: {version.tool_ids.length}</small>
+                          <pre>{version.system_prompt}</pre>
+                        </article>
+                      ))}
+                    </div>
+                  </>
                 ) : (
                   <p>Select an agent to view versions.</p>
                 )}

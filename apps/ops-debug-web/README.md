@@ -16,6 +16,8 @@ SaaS operator portal for tenant onboarding, agent setup, and runtime operations.
 - SaaS admin flows: list/create tenants, list/create agents, create/publish agent versions.
 - Workspace CRM view: tenant table, search, and tenant detail snapshot.
 - Guided Agent Builder wizard (identity -> speech/model -> prompt/publish).
+- Agent settings editor: update initial greeting and voice id.
+- Phone routing UI: add Twilio numbers and assign each number to an agent.
 
 ## Run
 
