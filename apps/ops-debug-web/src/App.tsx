@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type NumericLike = number | string | null;
 
@@ -35,6 +35,21 @@ type CallEvent = {
 };
 
 const defaultTenant = "11111111-1111-1111-1111-111111111111";
+const storageKey = "ops-debug-web.config.v1";
+
+type PersistedConfig = {
+  apiBaseUrl: string;
+  bootstrapKey: string;
+  tenantId: string;
+  token: string;
+  fromDate: string;
+  toDate: string;
+  agentFilter: string;
+  connectorUrl: string;
+  connectorToken: string;
+  userTurn: string;
+  autoRefreshSeconds: number;
+};
 
 function asNumber(value: NumericLike): number {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -100,6 +115,23 @@ function buildIsoFromDate(date: string, endOfDay: boolean): string | null {
   return parsed.toISOString();
 }
 
+function parseJwtClaims(token: string): { tenant_id?: string; role?: string } | null {
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return null;
+  }
+
+  try {
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const decoded = atob(padded);
+    const claims = JSON.parse(decoded) as { tenant_id?: string; role?: string };
+    return claims;
+  } catch {
+    return null;
+  }
+}
+
 const usdFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -108,15 +140,18 @@ const usdFormatter = new Intl.NumberFormat("en-US", {
 });
 
 export function App() {
+  const hasLoadedConfig = useRef(false);
   const [apiBaseUrl, setApiBaseUrl] = useState("http://localhost:4000");
   const [bootstrapKey, setBootstrapKey] = useState(
     "a10159516f8d5a7e2b493824a02376691c2dda52b6afe9c6"
   );
   const [tenantId, setTenantId] = useState(defaultTenant);
   const [token, setToken] = useState("");
+  const [manualTokenInput, setManualTokenInput] = useState("");
   const [fromDate, setFromDate] = useState(toLocalDate(7));
   const [toDate, setToDate] = useState(toLocalDate(0));
   const [agentFilter, setAgentFilter] = useState("");
+  const [autoRefreshSeconds, setAutoRefreshSeconds] = useState(0);
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [kpis, setKpis] = useState<KpiRecord[]>([]);
   const [selectedCallId, setSelectedCallId] = useState<string>("");
@@ -129,6 +164,91 @@ export function App() {
   const [userTurn, setUserTurn] = useState("Hola, dame un resumen breve de esta llamada");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Ready");
+
+  useEffect(() => {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) {
+      hasLoadedConfig.current = true;
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<PersistedConfig>;
+
+      if (typeof parsed.apiBaseUrl === "string") {
+        setApiBaseUrl(parsed.apiBaseUrl);
+      }
+      if (typeof parsed.bootstrapKey === "string") {
+        setBootstrapKey(parsed.bootstrapKey);
+      }
+      if (typeof parsed.tenantId === "string") {
+        setTenantId(parsed.tenantId);
+      }
+      if (typeof parsed.token === "string") {
+        setToken(parsed.token);
+        setManualTokenInput(parsed.token);
+      }
+      if (typeof parsed.fromDate === "string") {
+        setFromDate(parsed.fromDate);
+      }
+      if (typeof parsed.toDate === "string") {
+        setToDate(parsed.toDate);
+      }
+      if (typeof parsed.agentFilter === "string") {
+        setAgentFilter(parsed.agentFilter);
+      }
+      if (typeof parsed.connectorUrl === "string") {
+        setConnectorUrl(parsed.connectorUrl);
+      }
+      if (typeof parsed.connectorToken === "string") {
+        setConnectorToken(parsed.connectorToken);
+      }
+      if (typeof parsed.userTurn === "string") {
+        setUserTurn(parsed.userTurn);
+      }
+      if (typeof parsed.autoRefreshSeconds === "number" && Number.isFinite(parsed.autoRefreshSeconds)) {
+        setAutoRefreshSeconds(parsed.autoRefreshSeconds);
+      }
+    } catch {
+      // ignore malformed localStorage
+    } finally {
+      hasLoadedConfig.current = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedConfig.current) {
+      return;
+    }
+
+    const payload: PersistedConfig = {
+      apiBaseUrl,
+      bootstrapKey,
+      tenantId,
+      token,
+      fromDate,
+      toDate,
+      agentFilter,
+      connectorUrl,
+      connectorToken,
+      userTurn,
+      autoRefreshSeconds
+    };
+
+    localStorage.setItem(storageKey, JSON.stringify(payload));
+  }, [
+    agentFilter,
+    apiBaseUrl,
+    autoRefreshSeconds,
+    bootstrapKey,
+    connectorToken,
+    connectorUrl,
+    fromDate,
+    tenantId,
+    toDate,
+    token,
+    userTurn
+  ]);
 
   const selectedCall = useMemo(
     () => calls.find((call) => call.id === selectedCallId) ?? null,
@@ -166,6 +286,39 @@ export function App() {
     };
   }, [calls, kpis]);
 
+  const usingLocalhostApi = useMemo(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    const appHost = window.location.hostname;
+    const apiLooksLocal = apiBaseUrl.includes("localhost") || apiBaseUrl.includes("127.0.0.1");
+    return appHost !== "localhost" && appHost !== "127.0.0.1" && apiLooksLocal;
+  }, [apiBaseUrl]);
+
+  function applyManualToken() {
+    const trimmed = manualTokenInput.trim();
+    if (!trimmed) {
+      setStatus("Paste a JWT first");
+      return;
+    }
+
+    setToken(trimmed);
+    const claims = parseJwtClaims(trimmed);
+    if (claims?.tenant_id) {
+      setTenantId(claims.tenant_id);
+      setStatus(`Manual JWT loaded (tenant ${claims.tenant_id})`);
+      return;
+    }
+
+    setStatus("Manual JWT loaded");
+  }
+
+  function clearToken() {
+    setToken("");
+    setManualTokenInput("");
+    setStatus("JWT cleared");
+  }
+
   async function bootstrapToken(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -193,9 +346,14 @@ export function App() {
 
       const body = (await response.json()) as { token: string };
       setToken(body.token);
+      setManualTokenInput(body.token);
       setStatus("Token ready");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Token bootstrap failed");
+      if (error instanceof Error && error.message.includes("(404)")) {
+        setStatus("/internal/dev/token returned 404. In production use a manual JWT.");
+      } else {
+        setStatus(error instanceof Error ? error.message : "Token bootstrap failed");
+      }
     } finally {
       setBusy(false);
     }
@@ -349,6 +507,31 @@ export function App() {
     }
   }
 
+  useEffect(() => {
+    if (!token || autoRefreshSeconds <= 0) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void loadDashboard();
+      if (selectedCallId) {
+        void loadEvents(selectedCallId);
+      }
+    }, autoRefreshSeconds * 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [
+    agentFilter,
+    apiBaseUrl,
+    autoRefreshSeconds,
+    fromDate,
+    selectedCallId,
+    toDate,
+    token
+  ]);
+
   return (
     <div className="layout">
       <header className="hero">
@@ -374,6 +557,29 @@ export function App() {
             Issue JWT
           </button>
         </form>
+
+        {usingLocalhostApi ? (
+          <p className="warning">
+            You are on Railway but API Base URL points to localhost. Use your public control-plane URL.
+          </p>
+        ) : null}
+
+        <div className="row token-row">
+          <label>
+            Manual JWT (for production environments)
+            <input
+              value={manualTokenInput}
+              onChange={(e) => setManualTokenInput(e.target.value)}
+              placeholder="paste bearer token"
+            />
+          </label>
+          <button disabled={busy} onClick={applyManualToken} type="button">
+            Use Manual JWT
+          </button>
+          <button disabled={busy || !token} onClick={clearToken} type="button">
+            Clear JWT
+          </button>
+        </div>
 
         <div className="status-row">
           <span>
@@ -403,6 +609,18 @@ export function App() {
               onChange={(e) => setAgentFilter(e.target.value)}
               placeholder="uuid"
             />
+          </label>
+          <label>
+            Auto refresh
+            <select
+              value={String(autoRefreshSeconds)}
+              onChange={(e) => setAutoRefreshSeconds(Number(e.target.value))}
+            >
+              <option value="0">Off</option>
+              <option value="10">Every 10s</option>
+              <option value="30">Every 30s</option>
+              <option value="60">Every 60s</option>
+            </select>
           </label>
           <button disabled={busy || !token} onClick={() => void loadDashboard()} type="button">
             Refresh Dashboard
