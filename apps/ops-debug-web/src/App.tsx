@@ -38,6 +38,17 @@ type AgentVersionRecord = {
   tool_ids: string[];
 };
 
+type PhoneNumberRecord = {
+  id: string;
+  tenant_id: string;
+  agent_id: string | null;
+  twilio_sid: string;
+  e164: string;
+  status: string;
+  created_at: string;
+  agent_name: string | null;
+};
+
 type CallRecord = {
   id: string;
   agent_id: string;
@@ -230,6 +241,12 @@ export function App() {
   const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [agentVersions, setAgentVersions] = useState<AgentVersionRecord[]>([]);
+
+  const [phoneNumbers, setPhoneNumbers] = useState<PhoneNumberRecord[]>([]);
+  const [newPhoneE164, setNewPhoneE164] = useState("");
+  const [newPhoneTwilioSid, setNewPhoneTwilioSid] = useState("");
+  const [newPhoneAgentId, setNewPhoneAgentId] = useState("");
+  const [phoneAgentDrafts, setPhoneAgentDrafts] = useState<Record<string, string>>({});
 
   const [wizardStep, setWizardStep] = useState<WizardStep>(1);
   const [newAgentName, setNewAgentName] = useState("");
@@ -436,6 +453,8 @@ export function App() {
     setTenantId(nextTenantId);
     setSelectedAgentId("");
     setAgentVersions([]);
+    setPhoneNumbers([]);
+    setPhoneAgentDrafts({});
   }
 
   async function fetchTenants(): Promise<TenantRecord[]> {
@@ -450,6 +469,17 @@ export function App() {
     const payload = await requestJson<{ items: AgentRecord[] }>(`${apiBaseUrl}/internal/agents?${params.toString()}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
+    return payload.items;
+  }
+
+  async function fetchPhoneNumbersByTenant(targetTenantId: string): Promise<PhoneNumberRecord[]> {
+    const params = new URLSearchParams({ tenant_id: targetTenantId, limit: "200" });
+    const payload = await requestJson<{ items: PhoneNumberRecord[] }>(
+      `${apiBaseUrl}/internal/phone-numbers?${params.toString()}`,
+      {
+        headers: { Authorization: `Bearer ${token}` }
+      }
+    );
     return payload.items;
   }
 
@@ -564,6 +594,9 @@ export function App() {
     try {
       const items = await fetchAgentsByTenant(targetTenantId);
       setAgents(items);
+      if (newPhoneAgentId && !items.some((agent) => agent.id === newPhoneAgentId)) {
+        setNewPhoneAgentId("");
+      }
       const keepSelected = items.some((agent) => agent.id === selectedAgentId);
       const nextAgentId = keepSelected ? selectedAgentId : items[0]?.id ?? "";
       setSelectedAgentId(nextAgentId);
@@ -573,6 +606,117 @@ export function App() {
       setStatus(`Loaded ${items.length} agents`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not load agents");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadPhoneNumbers(targetTenantId = tenantId): Promise<void> {
+    if (!token) {
+      setStatus("Sign in first");
+      return;
+    }
+    if (!isUuid(targetTenantId)) {
+      setStatus("Select a valid tenant first");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Loading phone numbers...");
+    try {
+      const items = await fetchPhoneNumbersByTenant(targetTenantId);
+      setPhoneNumbers(items);
+
+      const draftMap: Record<string, string> = {};
+      for (const item of items) {
+        draftMap[item.id] = item.agent_id ?? "";
+      }
+      setPhoneAgentDrafts(draftMap);
+
+      setStatus(`Loaded ${items.length} phone numbers`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load phone numbers");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createPhoneNumber(event: FormEvent): Promise<void> {
+    event.preventDefault();
+
+    if (!token) {
+      setStatus("Sign in first");
+      return;
+    }
+    if (!isUuid(tenantId)) {
+      setStatus("Select a valid tenant first");
+      return;
+    }
+
+    const e164 = newPhoneE164.trim();
+    const twilioSid = newPhoneTwilioSid.trim();
+    if (!e164 || !twilioSid) {
+      setStatus("Enter both E.164 number and Twilio SID");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Creating phone number...");
+    try {
+      await requestJson<PhoneNumberRecord>(`${apiBaseUrl}/internal/phone-numbers`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          tenant_id: tenantId,
+          e164,
+          twilio_sid: twilioSid,
+          agent_id: newPhoneAgentId || null,
+          status: "active"
+        })
+      });
+
+      setNewPhoneE164("");
+      setNewPhoneTwilioSid("");
+      setNewPhoneAgentId("");
+
+      await loadPhoneNumbers(tenantId);
+      setStatus("Phone number created");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not create phone number");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function assignPhoneNumberAgent(phoneNumberId: string): Promise<void> {
+    if (!token) {
+      setStatus("Sign in first");
+      return;
+    }
+
+    const draftAgentId = phoneAgentDrafts[phoneNumberId] ?? "";
+
+    setBusy(true);
+    setStatus("Updating phone routing...");
+    try {
+      await requestJson<PhoneNumberRecord>(`${apiBaseUrl}/internal/phone-numbers/${phoneNumberId}/agent`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          agent_id: draftAgentId || null
+        })
+      });
+
+      await loadPhoneNumbers(tenantId);
+      setStatus("Phone routing updated");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not update phone routing");
     } finally {
       setBusy(false);
     }
@@ -1045,6 +1189,9 @@ export function App() {
                 <button disabled={busy} onClick={() => void loadAgents()} type="button">
                   Load Tenant Agents
                 </button>
+                <button disabled={busy} onClick={() => void loadPhoneNumbers()} type="button">
+                  Load Phone Numbers
+                </button>
               </div>
 
               <div className="split two-col">
@@ -1345,6 +1492,101 @@ export function App() {
                 ) : (
                   <p>Select an agent to view versions.</p>
                 )}
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <h3>Phone Routing</h3>
+                <small>Assign Twilio number to an agent for inbound calls.</small>
+              </div>
+
+              <div className="form-grid">
+                <button disabled={busy} onClick={() => void loadPhoneNumbers()} type="button">
+                  Load Phone Numbers
+                </button>
+                <button disabled={busy} onClick={() => void loadAgents()} type="button">
+                  Load Agents
+                </button>
+              </div>
+
+              <form className="form-grid soft" onSubmit={createPhoneNumber}>
+                <label>
+                  E.164 Number
+                  <input value={newPhoneE164} onChange={(event) => setNewPhoneE164(event.target.value)} placeholder="+526612345678" />
+                </label>
+                <label>
+                  Twilio SID
+                  <input
+                    value={newPhoneTwilioSid}
+                    onChange={(event) => setNewPhoneTwilioSid(event.target.value)}
+                    placeholder="PNxxxxxxxxxxxxxxxx"
+                  />
+                </label>
+                <label>
+                  Default Agent (optional)
+                  <select value={newPhoneAgentId} onChange={(event) => setNewPhoneAgentId(event.target.value)}>
+                    <option value="">Unassigned</option>
+                    {agents.map((agent) => (
+                      <option key={agent.id} value={agent.id}>
+                        {agent.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button disabled={busy} type="submit">
+                  Add Phone Number
+                </button>
+              </form>
+
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Number</th>
+                      <th>Twilio SID</th>
+                      <th>Status</th>
+                      <th>Assigned Agent</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {phoneNumbers.map((phone) => (
+                      <tr key={phone.id}>
+                        <td>
+                          <strong>{phone.e164}</strong>
+                          <small>{phone.id}</small>
+                        </td>
+                        <td>{phone.twilio_sid}</td>
+                        <td>{phone.status}</td>
+                        <td>
+                          <select
+                            value={phoneAgentDrafts[phone.id] ?? ""}
+                            onChange={(event) =>
+                              setPhoneAgentDrafts((current) => ({
+                                ...current,
+                                [phone.id]: event.target.value
+                              }))
+                            }
+                          >
+                            <option value="">Unassigned</option>
+                            {agents.map((agent) => (
+                              <option key={agent.id} value={agent.id}>
+                                {agent.name}
+                              </option>
+                            ))}
+                          </select>
+                          {phone.agent_name ? <small>Current: {phone.agent_name}</small> : null}
+                        </td>
+                        <td>
+                          <button disabled={busy} onClick={() => void assignPhoneNumberAgent(phone.id)} type="button">
+                            Save
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </section>
           </>

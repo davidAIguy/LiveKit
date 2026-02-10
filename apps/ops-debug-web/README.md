@@ -7,6 +7,7 @@ SaaS operator portal for tenant onboarding, agent setup, and runtime operations.
 - Sign in with email/password via `/auth/login`.
 - Run first-admin bootstrap from UI via `/auth/register-first-admin` (one-time).
 - Login-first UX; JWT handling stays internal to the app.
+- Phone routing UI: register Twilio phone numbers and assign each number to an agent.
 - Load KPI cards and KPI rows from `/client/kpis`.
 - Filter analytics by date range and optional `agent_id`.
 - List calls from `/client/calls` with active/ended state.

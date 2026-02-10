@@ -7,7 +7,7 @@ Initial backend service for the Voice Agent Ops Platform.
 - Fastify server with health endpoints.
 - JWT auth with role and tenant claims.
 - Role guards for internal and client routes.
-- Internal endpoints for tenants, agents, versions, tools, n8n integration test, and legal hold.
+- Internal endpoints for tenants, agents, phone number routing, versions, tools, n8n integration test, and legal hold.
 - Production auth endpoints for first-admin setup and email/password login.
 - Automation Gateway endpoints to execute tenant tools against n8n Cloud with timeout/retry and execution tracing.
 - Client read-only endpoints for KPIs, calls, transcript, and recording metadata.
@@ -77,6 +77,15 @@ node -e "const jwt=require('jsonwebtoken'); console.log(jwt.sign({sub:'user-1',t
 - `POST /internal/integrations/n8n/test`
 - Body fields: `tenant_id`, `base_url`, `auth_type`, `secret`
 - Behavior: tests connectivity with timeout/retry before storing encrypted secret.
+
+## Phone routing endpoints
+
+- `GET /internal/phone-numbers?tenant_id=<uuid>&limit=200`
+- `POST /internal/phone-numbers`
+  - Body fields: `tenant_id`, `e164`, `twilio_sid`, optional `agent_id`, optional `status`
+- `PATCH /internal/phone-numbers/:phoneNumberId/agent`
+  - Body fields: `agent_id` (`uuid` or `null`)
+- Behavior: maps inbound Twilio number (`To`) to tenant/agent used by webhook handoff.
 
 ## Automation Gateway endpoints
 

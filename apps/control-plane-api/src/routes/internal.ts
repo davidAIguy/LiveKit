@@ -85,6 +85,26 @@ const ListInternalAgentsQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(500).default(200)
 });
 
+const ListPhoneNumbersQuerySchema = z.object({
+  tenant_id: z.string().uuid().optional(),
+  limit: z.coerce.number().int().positive().max(500).default(200)
+});
+
+const CreatePhoneNumberSchema = z.object({
+  tenant_id: z.string().uuid(),
+  e164: z
+    .string()
+    .regex(/^\+[1-9]\d{7,14}$/, "e164 must be a valid E.164 number, e.g. +5266...")
+    .transform((value) => value.trim()),
+  twilio_sid: z.string().min(6),
+  agent_id: z.string().uuid().nullable().optional(),
+  status: z.enum(["active", "inactive"]).default("active")
+});
+
+const AssignPhoneNumberAgentSchema = z.object({
+  agent_id: z.string().uuid().nullable()
+});
+
 export async function registerInternalRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     "/internal/tenants",
@@ -142,6 +162,128 @@ export async function registerInternalRoutes(app: FastifyInstance): Promise<void
          order by created_at desc`
       );
       reply.send({ items: result.rows });
+    }
+  );
+
+  app.get(
+    "/internal/phone-numbers",
+    { preHandler: [requireRole(["internal_admin", "internal_operator"], true)] },
+    async (request, reply) => {
+      const auth = request.auth!;
+      const query = ListPhoneNumbersQuerySchema.parse(request.query);
+
+      let tenantFilter: string | null = null;
+      if (auth.role === "internal_admin") {
+        tenantFilter = query.tenant_id ?? null;
+      } else {
+        if (query.tenant_id && query.tenant_id !== auth.tenantId) {
+          reply.code(403).send({ error: "forbidden", message: "Cross-tenant read blocked" });
+          return;
+        }
+        tenantFilter = auth.tenantId;
+      }
+
+      const result = await db.query(
+        `select
+           pn.id,
+           pn.tenant_id,
+           pn.agent_id,
+           pn.twilio_sid,
+           pn.e164,
+           pn.status,
+           pn.created_at,
+           a.name as agent_name
+         from phone_numbers pn
+         left join agents a on a.id = pn.agent_id
+         where ($1::uuid is null or pn.tenant_id = $1::uuid)
+         order by pn.created_at desc
+         limit $2`,
+        [tenantFilter, query.limit]
+      );
+
+      reply.send({ items: result.rows });
+    }
+  );
+
+  app.post(
+    "/internal/phone-numbers",
+    { preHandler: [requireRole(["internal_admin", "internal_operator"], true)] },
+    async (request, reply) => {
+      const auth = request.auth!;
+      const body = CreatePhoneNumberSchema.parse(request.body);
+
+      if (!requireTenantMatch(body.tenant_id, auth.tenantId) && auth.role !== "internal_admin") {
+        reply.code(403).send({ error: "forbidden", message: "Cross-tenant write blocked" });
+        return;
+      }
+
+      if (body.agent_id) {
+        const agentRes = await db.query(`select id from agents where id = $1 and tenant_id = $2`, [body.agent_id, body.tenant_id]);
+        if (agentRes.rows.length === 0) {
+          reply.code(400).send({ error: "invalid_agent", message: "Agent must belong to the same tenant" });
+          return;
+        }
+      }
+
+      try {
+        const result = await db.query(
+          `insert into phone_numbers (tenant_id, agent_id, twilio_sid, e164, status)
+           values ($1, $2, $3, $4, $5)
+           returning id, tenant_id, agent_id, twilio_sid, e164, status, created_at`,
+          [body.tenant_id, body.agent_id ?? null, body.twilio_sid.trim(), body.e164, body.status]
+        );
+
+        reply.code(201).send(result.rows[0]);
+      } catch (error) {
+        if (typeof error === "object" && error && "code" in error && error.code === "23505") {
+          reply.code(409).send({
+            error: "conflict",
+            message: "Phone number or Twilio SID already exists"
+          });
+          return;
+        }
+        throw error;
+      }
+    }
+  );
+
+  app.patch(
+    "/internal/phone-numbers/:phoneNumberId/agent",
+    { preHandler: [requireRole(["internal_admin", "internal_operator"], true)] },
+    async (request, reply) => {
+      const auth = request.auth!;
+      const params = z.object({ phoneNumberId: z.string().uuid() }).parse(request.params);
+      const body = AssignPhoneNumberAgentSchema.parse(request.body);
+
+      const phoneRes = await db.query(`select id, tenant_id from phone_numbers where id = $1`, [params.phoneNumberId]);
+      if (phoneRes.rows.length === 0) {
+        reply.code(404).send({ error: "not_found", message: "Phone number not found" });
+        return;
+      }
+
+      const phone = phoneRes.rows[0] as { tenant_id: string };
+      if (auth.role !== "internal_admin" && phone.tenant_id !== auth.tenantId) {
+        reply.code(403).send({ error: "forbidden", message: "Cross-tenant write blocked" });
+        return;
+      }
+
+      if (body.agent_id) {
+        const agentRes = await db.query(`select id from agents where id = $1 and tenant_id = $2`, [body.agent_id, phone.tenant_id]);
+        if (agentRes.rows.length === 0) {
+          reply.code(400).send({ error: "invalid_agent", message: "Agent must belong to the same tenant" });
+          return;
+        }
+      }
+
+      const result = await db.query(
+        `update phone_numbers
+         set agent_id = $2
+         where id = $1
+         returning id, tenant_id, agent_id, twilio_sid, e164, status, created_at`,
+        [params.phoneNumberId, body.agent_id]
+      );
+
+      reply.send(result.rows[0]);
     }
   );
 
