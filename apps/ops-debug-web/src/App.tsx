@@ -2,6 +2,15 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type NumericLike = number | string | null;
 type ViewKey = "workspace" | "agents" | "operations";
+type WizardStep = 1 | 2 | 3;
+
+type TenantSnapshot = {
+  calls: number;
+  activeCalls: number;
+  resolvedCalls: number;
+  handoffCalls: number;
+  lastStartedAt: string | null;
+};
 
 type CallRecord = {
   id: string;
@@ -229,6 +238,8 @@ export function App() {
 
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
   const [newTenantName, setNewTenantName] = useState("");
+  const [tenantSearch, setTenantSearch] = useState("");
+  const [tenantSnapshots, setTenantSnapshots] = useState<Record<string, TenantSnapshot>>({});
 
   const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState("");
@@ -243,6 +254,10 @@ export function App() {
     "Eres un agente de voz profesional. Responde de forma clara y breve en espanol."
   );
   const [newVersionTemperature, setNewVersionTemperature] = useState("0.3");
+  const [wizardStep, setWizardStep] = useState<WizardStep>(1);
+  const [wizardVoiceId, setWizardVoiceId] = useState("");
+  const [wizardCreateVersion, setWizardCreateVersion] = useState(true);
+  const [wizardPublishNow, setWizardPublishNow] = useState(true);
 
   const [connectorUrl, setConnectorUrl] = useState(defaultConfig.connectorUrl);
   const [connectorToken, setConnectorToken] = useState(defaultConfig.connectorToken);
@@ -278,6 +293,33 @@ export function App() {
     }
     return items;
   }, [tenantId, tenants]);
+
+  const filteredTenants = useMemo(() => {
+    const query = tenantSearch.trim().toLowerCase();
+    if (!query) {
+      return tenantOptions;
+    }
+
+    return tenantOptions.filter((tenant) => {
+      return (
+        tenant.name.toLowerCase().includes(query) ||
+        tenant.id.toLowerCase().includes(query) ||
+        tenant.plan.toLowerCase().includes(query)
+      );
+    });
+  }, [tenantOptions, tenantSearch]);
+
+  const activeTenant = useMemo(
+    () => tenantOptions.find((tenant) => tenant.id === tenantId) ?? null,
+    [tenantId, tenantOptions]
+  );
+
+  const activeTenantSnapshot = useMemo(() => tenantSnapshots[tenantId] ?? null, [tenantId, tenantSnapshots]);
+
+  const wizardTemperature = Number(newVersionTemperature);
+  const wizardTemperatureValid = Number.isFinite(wizardTemperature) && wizardTemperature >= 0 && wizardTemperature <= 2;
+  const wizardCanSubmit =
+    newAgentName.trim().length >= 2 && isUuid(tenantId) && (!wizardCreateVersion || (newVersionPrompt.trim().length >= 10 && wizardTemperatureValid));
 
   const totals = useMemo(() => {
     let totalCalls = 0;
@@ -452,6 +494,69 @@ export function App() {
     setToken("");
     setManualTokenInput("");
     setStatus("JWT cleared");
+  }
+
+  function applyTenantSelection(nextTenantId: string): void {
+    setTenantId(nextTenantId);
+    setAgentFilter("");
+    setSelectedAgentId("");
+    setAgentVersions([]);
+  }
+
+  function summarizeCalls(callsList: Array<{ started_at: string; ended_at: string | null; outcome: string | null; handoff_reason: string | null }>): TenantSnapshot {
+    const calls = callsList.length;
+    const activeCalls = callsList.filter((call) => !call.ended_at).length;
+    const resolvedCalls = callsList.filter((call) => call.outcome === "resolved").length;
+    const handoffCalls = callsList.filter((call) => call.outcome === "handoff" || Boolean(call.handoff_reason)).length;
+    const lastStartedAt = callsList[0]?.started_at ?? null;
+
+    return {
+      calls,
+      activeCalls,
+      resolvedCalls,
+      handoffCalls,
+      lastStartedAt
+    };
+  }
+
+  async function loadTenantSnapshot(targetTenantId = tenantId): Promise<void> {
+    if (!token) {
+      setStatus("Sign in first");
+      return;
+    }
+
+    if (!isUuid(targetTenantId)) {
+      setStatus("Select a valid tenant first");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("Loading tenant snapshot...");
+
+    try {
+      const params = new URLSearchParams({ tenant_id: targetTenantId, limit: "200" });
+      const payload = await requestJson<{
+        items: Array<{
+          started_at: string;
+          ended_at: string | null;
+          outcome: string | null;
+          handoff_reason: string | null;
+        }>;
+      }>(`${apiBaseUrl}/internal/calls?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      const summary = summarizeCalls(payload.items);
+      setTenantSnapshots((current) => ({
+        ...current,
+        [targetTenantId]: summary
+      }));
+      setStatus(`Tenant snapshot loaded (${summary.calls} calls)`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load tenant snapshot");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function registerFirstAdmin(event: FormEvent) {
@@ -662,25 +767,40 @@ export function App() {
     }
   }
 
-  async function createAgent(event: FormEvent) {
+  async function createAgentFromWizard(event: FormEvent) {
     event.preventDefault();
+
     if (!token) {
       setStatus("Sign in first");
       return;
     }
+
     if (!isUuid(tenantId)) {
       setStatus("Select a valid tenant first");
       return;
     }
 
-    const name = newAgentName.trim();
-    if (name.length < 2) {
+    const agentName = newAgentName.trim();
+    if (agentName.length < 2) {
       setStatus("Agent name must have at least 2 chars");
       return;
     }
 
+    if (wizardCreateVersion) {
+      if (newVersionPrompt.trim().length < 10) {
+        setStatus("System prompt must have at least 10 chars");
+        return;
+      }
+
+      if (!wizardTemperatureValid) {
+        setStatus("Temperature must be between 0 and 2");
+        return;
+      }
+    }
+
     setBusy(true);
-    setStatus("Creating agent...");
+    setStatus("Creating agent workflow...");
+
     try {
       const agent = await requestJson<AgentRecord>(`${apiBaseUrl}/internal/agents`, {
         method: "POST",
@@ -690,20 +810,55 @@ export function App() {
         },
         body: JSON.stringify({
           tenant_id: tenantId,
-          name,
+          name: agentName,
           language: newAgentLanguage,
           llm_model: newAgentLlmModel,
           stt_provider: newAgentSttProvider,
-          tts_provider: newAgentTtsProvider
+          tts_provider: newAgentTtsProvider,
+          voice_id: wizardVoiceId.trim() || undefined
         })
       });
 
-      setNewAgentName("");
+      let versionCreated = false;
+      if (wizardCreateVersion) {
+        const version = await requestJson<AgentVersionRecord>(`${apiBaseUrl}/internal/agents/${agent.id}/versions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            system_prompt: newVersionPrompt.trim(),
+            temperature: wizardTemperature
+          })
+        });
+
+        versionCreated = true;
+        if (wizardPublishNow) {
+          await requestJson(`${apiBaseUrl}/internal/agents/${agent.id}/versions/${version.id}/publish`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` }
+          });
+        }
+      }
+
       await loadAgents(tenantId);
       setSelectedAgentId(agent.id);
-      setStatus(`Agent created: ${agent.name}`);
+      await loadAgentVersions(agent.id);
+
+      setWizardStep(1);
+      setNewAgentName("");
+      setWizardVoiceId("");
+
+      setStatus(
+        versionCreated
+          ? wizardPublishNow
+            ? `Agent ${agent.name} created and published`
+            : `Agent ${agent.name} created with draft version`
+          : `Agent ${agent.name} created`
+      );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not create agent");
+      setStatus(error instanceof Error ? error.message : "Could not create agent from wizard");
     } finally {
       setBusy(false);
     }
@@ -1039,14 +1194,22 @@ export function App() {
 
             <section className="panel">
               <div className="panel-title-row">
-                <h3>Tenant Workspace</h3>
-                <small>Crea clientes y selecciona el tenant activo.</small>
+                <h3>Client Workspace</h3>
+                <small>CRM view for tenants, health snapshot, and onboarding.</small>
               </div>
 
               <div className="form-grid">
                 <label>
-                  Tenant
-                  <select value={tenantId} onChange={(event) => setTenantId(event.target.value)}>
+                  Search tenant
+                  <input
+                    value={tenantSearch}
+                    onChange={(event) => setTenantSearch(event.target.value)}
+                    placeholder="name, id, plan"
+                  />
+                </label>
+                <label>
+                  Active tenant
+                  <select value={tenantId} onChange={(event) => applyTenantSelection(event.target.value)}>
                     {tenantOptions.map((tenant) => (
                       <option key={tenant.id} value={tenant.id}>
                         {tenant.name} ({tenant.id.slice(0, 8)}...)
@@ -1057,21 +1220,122 @@ export function App() {
                 <button disabled={busy || !token} onClick={() => void loadTenants()} type="button">
                   Load Tenants
                 </button>
+                <button disabled={busy || !token || !isUuid(tenantId)} onClick={() => void loadTenantSnapshot()} type="button">
+                  Refresh Snapshot
+                </button>
+                <button disabled={busy || !token || !isUuid(tenantId)} onClick={() => void loadAgents(tenantId)} type="button">
+                  Load Tenant Agents
+                </button>
               </div>
 
-              <form className="form-grid soft" onSubmit={createTenant}>
-                <label>
-                  New tenant name
-                  <input
-                    value={newTenantName}
-                    onChange={(event) => setNewTenantName(event.target.value)}
-                    placeholder="Acme Dental"
-                  />
-                </label>
-                <button disabled={busy || !token} type="submit">
-                  Create Tenant
-                </button>
-              </form>
+              <div className="split-panel crm-split">
+                <div>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Tenant</th>
+                          <th>Plan</th>
+                          <th>Status</th>
+                          <th>Created</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredTenants.map((tenant) => {
+                          const isActiveTenant = tenant.id === tenantId;
+                          const snapshot = tenantSnapshots[tenant.id];
+                          return (
+                            <tr key={tenant.id} className={isActiveTenant ? "row-active" : ""}>
+                              <td>
+                                <strong>{tenant.name}</strong>
+                                <br />
+                                <small>{tenant.id}</small>
+                                {snapshot ? <small>Calls(200): {snapshot.calls}</small> : null}
+                              </td>
+                              <td>{tenant.plan}</td>
+                              <td>{tenant.status}</td>
+                              <td>{formatDateTime(tenant.created_at)}</td>
+                              <td>
+                                <button
+                                  disabled={busy}
+                                  onClick={() => {
+                                    applyTenantSelection(tenant.id);
+                                    void loadTenantSnapshot(tenant.id);
+                                  }}
+                                  type="button"
+                                >
+                                  Open
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="panel subpanel">
+                  <div className="panel-title-row">
+                    <h3>Tenant Detail</h3>
+                    <small>{activeTenant?.name ?? "Select tenant"}</small>
+                  </div>
+
+                  {activeTenant ? (
+                    <>
+                      <div className="detail-grid">
+                        <small>
+                          <strong>Tenant ID:</strong> {activeTenant.id}
+                        </small>
+                        <small>
+                          <strong>Plan:</strong> {activeTenant.plan}
+                        </small>
+                        <small>
+                          <strong>Status:</strong> {activeTenant.status}
+                        </small>
+                        <small>
+                          <strong>Timezone:</strong> {activeTenant.timezone}
+                        </small>
+                        <small>
+                          <strong>Created:</strong> {formatDateTime(activeTenant.created_at)}
+                        </small>
+                        <small>
+                          <strong>Agents loaded:</strong> {agents.filter((agent) => agent.tenant_id === activeTenant.id).length}
+                        </small>
+                        <small>
+                          <strong>Calls sample:</strong> {activeTenantSnapshot?.calls ?? "-"}
+                        </small>
+                        <small>
+                          <strong>Resolved sample:</strong> {activeTenantSnapshot?.resolvedCalls ?? "-"}
+                        </small>
+                        <small>
+                          <strong>Handoff sample:</strong> {activeTenantSnapshot?.handoffCalls ?? "-"}
+                        </small>
+                        <small>
+                          <strong>Active sample:</strong> {activeTenantSnapshot?.activeCalls ?? "-"}
+                        </small>
+                      </div>
+
+                      <form className="form-grid soft" onSubmit={createTenant}>
+                        <label>
+                          New tenant name
+                          <input
+                            value={newTenantName}
+                            onChange={(event) => setNewTenantName(event.target.value)}
+                            placeholder="Acme Dental"
+                          />
+                        </label>
+                        <button disabled={busy || !token} type="submit">
+                          Create Tenant
+                        </button>
+                      </form>
+                    </>
+                  ) : (
+                    <p className="muted">Select a tenant row to view CRM detail.</p>
+                  )}
+                </div>
+              </div>
             </section>
 
             <section className="panel">
@@ -1116,61 +1380,158 @@ export function App() {
           <>
             <section className="panel">
               <div className="panel-title-row">
-                <h3>Agent Catalog</h3>
-                <small>Define configuracion base por tenant.</small>
+                <h3>Agent Builder Wizard</h3>
+                <small>Create agent and initial prompt flow in guided steps.</small>
               </div>
 
-              <div className="form-grid">
-                <label>
-                  Active tenant
-                  <select
-                    value={tenantId}
-                    onChange={(event) => {
-                      setTenantId(event.target.value);
-                      setSelectedAgentId("");
-                      setAgentVersions([]);
+              <div className="wizard-steps">
+                <button className={wizardStep === 1 ? "active" : ""} onClick={() => setWizardStep(1)} type="button">
+                  1. Identity
+                </button>
+                <button className={wizardStep === 2 ? "active" : ""} onClick={() => setWizardStep(2)} type="button">
+                  2. Speech + Model
+                </button>
+                <button className={wizardStep === 3 ? "active" : ""} onClick={() => setWizardStep(3)} type="button">
+                  3. Prompt + Publish
+                </button>
+              </div>
+
+              <form className="wizard-panel" onSubmit={createAgentFromWizard}>
+                {wizardStep === 1 ? (
+                  <div className="form-grid">
+                    <label>
+                      Active tenant
+                      <select
+                        value={tenantId}
+                        onChange={(event) => {
+                          applyTenantSelection(event.target.value);
+                        }}
+                      >
+                        {tenantOptions.map((tenant) => (
+                          <option key={tenant.id} value={tenant.id}>
+                            {tenant.name} ({tenant.id.slice(0, 8)}...)
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Agent name
+                      <input
+                        value={newAgentName}
+                        onChange={(event) => setNewAgentName(event.target.value)}
+                        placeholder="Reception Bot"
+                      />
+                    </label>
+                    <label>
+                      Language
+                      <input value={newAgentLanguage} onChange={(event) => setNewAgentLanguage(event.target.value)} />
+                    </label>
+                  </div>
+                ) : null}
+
+                {wizardStep === 2 ? (
+                  <div className="form-grid">
+                    <label>
+                      LLM model
+                      <input value={newAgentLlmModel} onChange={(event) => setNewAgentLlmModel(event.target.value)} />
+                    </label>
+                    <label>
+                      STT provider
+                      <input value={newAgentSttProvider} onChange={(event) => setNewAgentSttProvider(event.target.value)} />
+                    </label>
+                    <label>
+                      TTS provider
+                      <input value={newAgentTtsProvider} onChange={(event) => setNewAgentTtsProvider(event.target.value)} />
+                    </label>
+                    <label>
+                      Voice ID (optional)
+                      <input value={wizardVoiceId} onChange={(event) => setWizardVoiceId(event.target.value)} placeholder="voice_123" />
+                    </label>
+                  </div>
+                ) : null}
+
+                {wizardStep === 3 ? (
+                  <div className="form-grid">
+                    <label>
+                      Create initial version
+                      <select
+                        value={wizardCreateVersion ? "yes" : "no"}
+                        onChange={(event) => setWizardCreateVersion(event.target.value === "yes")}
+                      >
+                        <option value="yes">Yes</option>
+                        <option value="no">No</option>
+                      </select>
+                    </label>
+                    <label>
+                      Publish after create
+                      <select
+                        value={wizardPublishNow ? "yes" : "no"}
+                        onChange={(event) => setWizardPublishNow(event.target.value === "yes")}
+                        disabled={!wizardCreateVersion}
+                      >
+                        <option value="yes">Yes</option>
+                        <option value="no">No</option>
+                      </select>
+                    </label>
+                    <label>
+                      Temperature
+                      <input
+                        value={newVersionTemperature}
+                        onChange={(event) => setNewVersionTemperature(event.target.value)}
+                        placeholder="0.3"
+                        disabled={!wizardCreateVersion}
+                      />
+                    </label>
+                    <label className="wide">
+                      System prompt
+                      <input
+                        value={newVersionPrompt}
+                        onChange={(event) => setNewVersionPrompt(event.target.value)}
+                        placeholder="Prompt para el agente"
+                        disabled={!wizardCreateVersion}
+                      />
+                    </label>
+                    <div className="wizard-summary">
+                      <small>
+                        <strong>Review:</strong> {newAgentName || "New Agent"} | {newAgentLanguage} | {newAgentLlmModel}
+                      </small>
+                      <small>
+                        STT/TTS: {newAgentSttProvider} / {newAgentTtsProvider}
+                      </small>
+                      <small>
+                        Version: {wizardCreateVersion ? (wizardPublishNow ? "create + publish" : "create draft") : "skip"}
+                      </small>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="wizard-actions">
+                  <button disabled={busy || wizardStep === 1} onClick={() => setWizardStep((wizardStep - 1) as WizardStep)} type="button">
+                    Back
+                  </button>
+                  <button
+                    disabled={
+                      busy ||
+                      wizardStep === 3 ||
+                      (wizardStep === 1 && (!isUuid(tenantId) || newAgentName.trim().length < 2)) ||
+                      (wizardStep === 2 && !newAgentLlmModel.trim())
+                    }
+                    onClick={() => {
+                      if (wizardStep < 3) {
+                        setWizardStep((wizardStep + 1) as WizardStep);
+                      }
                     }}
+                    type="button"
                   >
-                    {tenantOptions.map((tenant) => (
-                      <option key={tenant.id} value={tenant.id}>
-                        {tenant.name} ({tenant.id.slice(0, 8)}...)
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button disabled={busy || !token} onClick={() => void loadAgents()} type="button">
-                  Load Agents
-                </button>
-              </div>
-
-              <form className="form-grid soft" onSubmit={createAgent}>
-                <label>
-                  Agent name
-                  <input
-                    value={newAgentName}
-                    onChange={(event) => setNewAgentName(event.target.value)}
-                    placeholder="Reception Bot"
-                  />
-                </label>
-                <label>
-                  Language
-                  <input value={newAgentLanguage} onChange={(event) => setNewAgentLanguage(event.target.value)} />
-                </label>
-                <label>
-                  LLM
-                  <input value={newAgentLlmModel} onChange={(event) => setNewAgentLlmModel(event.target.value)} />
-                </label>
-                <label>
-                  STT
-                  <input value={newAgentSttProvider} onChange={(event) => setNewAgentSttProvider(event.target.value)} />
-                </label>
-                <label>
-                  TTS
-                  <input value={newAgentTtsProvider} onChange={(event) => setNewAgentTtsProvider(event.target.value)} />
-                </label>
-                <button disabled={busy || !token || !isUuid(tenantId)} type="submit">
-                  Create Agent
-                </button>
+                    Next
+                  </button>
+                  <button disabled={busy || !token || !wizardCanSubmit} type="submit">
+                    Create Workflow
+                  </button>
+                  <button disabled={busy || !token} onClick={() => void loadAgents()} type="button">
+                    Reload Agents
+                  </button>
+                </div>
               </form>
             </section>
 

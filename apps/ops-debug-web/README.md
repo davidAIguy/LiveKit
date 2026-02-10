@@ -14,6 +14,8 @@ SaaS operator portal for tenant onboarding, agent setup, and runtime operations.
 - Accept manual JWT paste for production environments where `/internal/dev/token` is disabled.
 - Persist dashboard config in `localStorage` and optional auto-refresh.
 - SaaS admin flows: list/create tenants, list/create agents, create/publish agent versions.
+- Workspace CRM view: tenant table, search, and tenant detail snapshot.
+- Guided Agent Builder wizard (identity -> speech/model -> prompt/publish).
 - Send simulated user turns to `agent-connector` and inspect AI responses in timeline.
 - Check connector AI mode (`mock_ai`, `openai`, `openai_unconfigured`).
 
